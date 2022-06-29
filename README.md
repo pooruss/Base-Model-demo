@@ -17,14 +17,14 @@ python ./main.py \
 --use_ema False \
 --model_name coke \
 --checkpoint_num 50 \
---batch_size 512 \
---learning_rate 1e-3 \
+--batch_size 8 \
+--learning_rate 1e-5 \
 --gpu_ids 0 \
 --soft_label False \
 --weight_decay 0.0001 \
 --use_pretrain False \
 --save_path ./checkpoints/ \
---epoch 200 \
---bmtrain True
+--epoch 10 \
+--bmtrain False
 ```
 
