@@ -154,7 +154,7 @@ class CoKE(nn.Module):
         # enc_out = enc_out.transpose(0, 1)
         # enc_out = enc_out[src_ids == 50264]
         # # method 4
-        last_hidden_state = last_hidden_state[src_ids==103]
+        last_hidden_state = last_hidden_state[src_ids==103] #???
 
         logits = self.fc(last_hidden_state)
         output_map = {
