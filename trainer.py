@@ -102,6 +102,7 @@ class Trainer():
             self.device = torch.device('cuda:{}'.format(self.gpu_ids[0]) if self.use_cuda else 'cpu')
 
         self.batch_size = train_config["batch_size"]
+        self.vocab_size = train_config["vocab_size"]
         self.epoch = train_config["epoch"]
         self.learning_rate = train_config["learning_rate"]
         self.skip_steps = train_config["skip_steps"]
@@ -110,12 +111,12 @@ class Trainer():
         self.use_ema = train_config["use_ema"]
         self.ema_decay = train_config["ema_decay"]
 
-
         self.checkpoint_num = train_config["checkpoint_num"]
         self.log_file = open(os.path.join(self.save_path, 'train.log'), 'w', encoding='utf-8')
 
         self.pad_id = train_config["pad_id"]
-
+        self.mask_id = int(train_config["mask_id"])
+        self.e_mask_id = int(train_config["e_mask_id"])
         self.loss_function = None
         self.optimizer = None
         self.lr_scheduler = None
@@ -150,79 +151,65 @@ class Trainer():
         if self.use_ema:
             self.ema_model.apply_shadow()
         self.model.eval()
-        acc, loss_sum = 0.0, 0.0
+        acc, loss_sum, total_acc = 0.0, 0.0, 0.0
         step_per_epoch = len(self.val_data_loader)
         print("----------- validation -----------")
         self.log_file.write(str(len(self.val_data_loader)) + '\n')
         for iter, batch_data in enumerate(self.val_data_loader):
             # fetch batch data
             try:
-                all_ids, input_mask, seg_ids, pos_id, cls_labels = batch_data
+                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, \
+                mem_label_ids, mem_mask_pos = batch_data
             except RuntimeError:
                 print("One data instance's length should be 5, received {}.".format(len(batch_data)))
                 continue
-            src_id, mask_label_ids = mask_tokens(vocab_size=self.model.config.vocab_size,
-                                                 tokenizer=self.model.tokenizer,
-                                                 inputs=all_ids,
-                                                 mlm_prob=0.15)
-            all_ids=None
-            mask_pos = np.argwhere(np.array(src_id).reshape(-1) == 103)
-            mask_pos = torch.from_numpy(mask_pos)
-            mask_label_ids = torch.reshape(mask_label_ids, (-1,))
-            mask_label_ids = mask_label_ids[mask_pos]
             if self.use_cuda:
-                src_id, input_mask, seg_ids, pos_id, mask_pos, mask_label_ids, cls_labels = \
-                    src_id.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
-                    pos_id.to(self.device), mask_pos.to(self.device), mask_label_ids.to(self.device), \
-                    cls_labels.to(self.device)
+                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, mem_mask_pos = \
+                    src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
+                    pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device), \
+                    mem_mask_pos.to(self.device)
+
+            mlm_mask_pos = torch.argwhere(src_ids.reshape(-1) == self.mask_id)
+            mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos]
+
             input_x = {
-                'src_ids': src_id,
+                'src_ids': src_ids,
                 'input_mask': input_mask,
                 'segment_ids': seg_ids,
-                'position_ids': pos_id
+                'position_ids': pos_ids,
+                'mlm_mask_pos': mlm_mask_pos,
+                'mem_mask_pos': mem_mask_pos
             }
             torch.cuda.synchronize()
+            self.optimizer.zero_grad()
+
             # forward
             out = self.model(input_x)
-            logits = out["logits"]
-            pooled_output = out["pooled_output"]
-
-            pos_pos = torch.argwhere(cls_labels.view(-1) == 1)
-            neg_pos = torch.argwhere(cls_labels.view(-1) == 0)
-            pos_loss = F.cross_entropy(pooled_output[pos_pos].view(-1, 2), cls_labels[pos_pos].view(-1))
-            neg_loss = F.cross_entropy(pooled_output[neg_pos].view(-1, 2), cls_labels[neg_pos].view(-1))
-            # cls_loss = F.cross_entropy(pooled_output[neg_pos].view(-1, 2), cls_labels[neg_pos].view(-1))
-            print(pos_loss)
-            print(neg_loss)
-            cls_loss = F.relu(pos_loss - neg_loss + 0.2)
-
-            # loss
-            if self.soft_label:
-                bz = src_id.size()[0]
-                one_hot_labels = F.one_hot(mask_label.squeeze(), num_classes=16396)
-                is_relation = torch.cat((torch.zeros(size=[bz, 16396 - 1345]), torch.ones(size=[bz, 1345])), dim=-1).to(
-                    self.device)
-                label = (one_hot_labels * 0.8
-                              + (1.0 - one_hot_labels - is_relation)
-                              * ((1.0 - 0.8) / (16396 - 1 - 1345))).detach()
-                label.requires_grad = False
-            else:
-                label = mask_label_ids
+            mlm_last_hidden_state = out["mlm_last_hidden_state"]
+            mem_last_hidden_state = out["mem_last_hidden_state"]
+            # calc mlm_loss
             mlm_loss = self.loss_function(
-                input=logits,
-                target=label.squeeze()
+                input=mlm_last_hidden_state,
+                target=mlm_label_ids.squeeze()
+            )
+            mem_label_ids = mem_label_ids.view(-1, 1).squeeze()
+            mem_loss = self.loss_function(
+                input=mem_last_hidden_state,
+                target=mem_label_ids
             )
 
             if self.bmtrain:
-                global_loss = bmt.sum_loss(mlm_loss).item()
-                mlm_loss = self.optimizer.loss_scale(mlm_loss)
+                loss = (mlm_loss + mem_loss)
+                global_loss = bmt.sum_loss(loss).item()
+                loss = self.optimizer.loss_scale(loss)
                 loss_sum += global_loss
             else:
-                loss_sum += (mlm_loss.data + cls_loss.data)
-            acc += pooled_output.max(dim=1)[1].eq(cls_labels.squeeze()).sum().data
+                loss_sum += (mlm_loss.data + mem_loss.data)
+            acc = mem_last_hidden_state.max(dim=1)[1].eq(mem_label_ids.squeeze()).sum()
+            total_acc += (acc * 100 / mem_label_ids.size(0))
 
         # acc = acc * 100 / float(len(self.val_data_loader.dataset))
-        acc = acc * 100 / len(self.val_data_loader)
+        total_acc = total_acc / float(len(self.val_data_loader))
         loss_sum = loss_sum / len(self.val_data_loader)
         if not self.bmtrain:
             loss_sum = loss_sum.cpu().detach().numpy()
@@ -230,7 +217,7 @@ class Trainer():
             bmt.print_rank('loss:{}, acc:{}.'.format(str(loss_sum), str(acc)))
             bmt.synchronize()
         else:
-            print('loss:{}, acc:{}.'.format(str(loss_sum), str(acc)))
+            print('val mem_loss:{}, val acc:{}.'.format(str(mem_loss.cpu().detach().numpy()), str(acc)))
         # wandb.log({"validation loss": loss_sum})
         self.log_file.write(('loss:{}, acc:{}%.'.format(str(loss_sum), str(acc))) + '\n')
 
@@ -275,75 +262,69 @@ class Trainer():
             for iter, batch_data in enumerate(self.train_data_loader):
                 # fetch batch data
                 try:
-                    all_ids, input_mask, seg_ids, pos_id, cls_labels = batch_data
+                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, \
+                    mem_label_ids, mem_mask_pos = batch_data
                 except RuntimeError:
                     print("One data instance's length should be 5, received {}.".format(len(batch_data)))
                     continue
-                src_id, mask_label_ids = mask_tokens(vocab_size=self.model.config.vocab_size,
-                                                     tokenizer=self.model.tokenizer,
-                                                     inputs=all_ids,
-                                                     mlm_prob=0.15)
-                np_mlm_input_ids = np.array(src_id).reshape(-1)
-                mask_pos = np.argwhere(np_mlm_input_ids == 103)
-                mask_pos = torch.from_numpy(mask_pos)
-                mask_label_ids = torch.reshape(mask_label_ids, (-1,))
-                mask_label_ids = mask_label_ids[mask_pos]
                 if self.use_cuda:
-                    src_id, input_mask, seg_ids, pos_id, mask_pos, mask_label_ids, cls_labels = \
-                        src_id.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
-                        pos_id.to(self.device), mask_pos.to(self.device), mask_label_ids.to(self.device), \
-                        cls_labels.to(self.device)
-                # neg_pos = torch.argwhere(cls_labels.view(-1) == 0)
-                # pos_pos = torch.argwhere(cls_labels.view(-1) == 1)
+                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, mem_mask_pos = \
+                        src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
+                        pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device), \
+                        mem_mask_pos.to(self.device)
+                with torch.no_grad():
+                    mlm_mask_pos = torch.argwhere(src_ids.reshape(-1) == self.mask_id)
+                    mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos].squeeze()
+                    mem_label_ids = mem_label_ids.view(-1, 1).squeeze()
                 input_x = {
-                    'src_ids': src_id,
+                    'src_ids': src_ids,
                     'input_mask': input_mask,
                     'segment_ids': seg_ids,
-                    'position_ids': pos_id
+                    'position_ids': pos_ids,
+                    'mlm_mask_pos': mlm_mask_pos,
+                    'mem_mask_pos': mem_mask_pos
                 }
                 torch.cuda.synchronize()
                 self.optimizer.zero_grad()
 
                 # forward
                 out = self.model(input_x)
-                logits = out["logits"]
-                pooled_output = out["pooled_output"]
-
-                # pos_loss = F.cross_entropy(pooled_output[pos_pos].view(-1, 2), cls_labels[pos_pos].view(-1))
-                # neg_loss = F.cross_entropy(pooled_output[neg_pos].view(-1, 2), cls_labels[neg_pos].view(-1))
-                # cls_loss = F.relu(pos_loss + neg_loss + 0.2)
-
-                cls_loss = F.cross_entropy(pooled_output.view(-1, 2), cls_labels.view(-1))
-
-
-                # soft_label
-                if self.soft_label:
-                    bz = src_id.size()[0]
-                    one_hot_labels = F.one_hot(mask_label_ids.squeeze(), num_classes=16396)
-                    is_relation = torch.cat((torch.zeros(size=[bz, 16396-1345]), torch.ones(size=[bz, 1345])), dim=-1).to(self.device)
-                    label = (one_hot_labels * 0.8
-                                   + (1.0 - one_hot_labels - is_relation)
-                                   * ((1.0 - 0.8) / (16396 - 1 - 1345))).detach()
-                    label.requires_grad = False
-                else:
-                    label = mask_label_ids
+                mlm_last_hidden_state = out["mlm_last_hidden_state"]
+                mem_last_hidden_state = out["mem_last_hidden_state"]
                 # calc mlm_loss
                 mlm_loss = self.loss_function(
-                    input=logits,
-                    target=label.squeeze()
+                    input=mlm_last_hidden_state.half(),
+                    target=mlm_label_ids.long()
                 )
+
+                mem_loss = self.loss_function(
+                    input=mem_last_hidden_state.half(),
+                    target=mem_label_ids.long()
+                )
+                # print(mem_last_hidden_state.shape)
+                # print(mem_label_ids.shape)
+                # print(mem_label_ids)
+                # mem_loss = self.loss_function(
+                #     input=mem_last_hidden_state,
+                #     target=mem_label_ids.squeeze()
+                # )
 
                 # backward
                 if self.bmtrain:
-                    global_loss = bmt.sum_loss(mlm_loss).item()
-                    mlm_loss = self.optimizer.loss_scale(mlm_loss)
-                    mlm_loss.backward()
+                    loss = mlm_loss
+                    global_loss = bmt.sum_loss(loss).item()
+                    loss = self.optimizer.loss_scale(loss)
+                    loss.mean().backward()
+                    loss = mem_loss
+                    global_loss = bmt.sum_loss(loss).item()
+                    loss = self.optimizer.loss_scale(loss)
+                    loss.backward()
                     bmt.optim_step(self.optimizer)
                     lr = self.lr_scheduler.get_lr()
                     torch.cuda.synchronize()
                 else:
-                    loss = cls_loss + mlm_loss
-                    loss.backward()
+                    loss = mlm_loss + mem_loss
+                    loss.mean().backward()
                     self.optimizer.step()
                     lr = self.lr_scheduler.get_last_lr()[0]
                 if self.use_ema:
@@ -351,27 +332,28 @@ class Trainer():
 
                 # log
                 # print(logits.max(dim=1)[1])
-                acc = pooled_output.max(dim=1)[1].eq(cls_labels.squeeze()).sum()
-                acc = acc * 100 / float(batch_data[0].size(0))
+                acc = mem_last_hidden_state.max(dim=1)[1].eq(mem_label_ids.squeeze()).sum()
+                acc = acc * 100 / mem_label_ids.size(0)
                 current_step = epoch * step_per_epoch + iter
 
                 if iter % (step_per_epoch / 16) == 0 or iter + 1 == step_per_epoch:
                     if not self.bmtrain:
-                        print('Epoch:{}, Step:{}/{}, mlm_loss:{}, cls_loss:{}, cls_acc:{}%, lr:{}.'.format(
+                        print('Epoch:{}, Step:{}/{}, mlm_loss:{}, mem_loss:{}, cls_acc:{}%, lr:{}.'.format(
                             str(epoch), str(current_step),
                             str(total_train_step),
                             str(mlm_loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
-                            str(cls_loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
+                            str(mem_loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
                             str(acc.cpu().detach().numpy()), str(lr)
-                            )
+                        )
                         )
                     else:
-                        bmt.print_rank('Epoch:{}, Step:{}/{}, loss:{}, acc:{}%, lr:{}.'.format(
+                        bmt.print_rank('Epoch:{}, Step:{}/{}, mlm_loss:{}, mem_loss:{}, cls_acc:{}%, lr:{}.'.format(
                             str(epoch), str(current_step),
                             str(total_train_step),
-                            str(loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
+                            str(mlm_loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
+                            str(mem_loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
                             str(acc.cpu().detach().numpy()), str(lr)
-                            )
+                        )
                         )
 
                         # bmt.synchronize()
@@ -384,7 +366,7 @@ class Trainer():
                         str(total_train_step),
                         str(loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
                         str(acc.cpu().detach().numpy()), str(lr)) + '\n'
-                    )
+                                        )
                     self.log_file.flush()
             # wandb.log({
             #     "learning rate": np.array(float(lr))

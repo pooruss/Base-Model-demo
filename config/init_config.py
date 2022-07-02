@@ -15,6 +15,7 @@ def init_coke_net_config(args, logger, print_config=True):
     config["initializer_range"] = args.initializer_range
     config["intermediate_size"] = args.intermediate_size
     config["mask_id"] = args.mask_id
+    config['e_mask_id'] = args.e_mask_id
     if print_config is True:
         logger.info('----------- CoKE Network Configuration -------------')
         for arg, value in config.items():
@@ -30,8 +31,11 @@ def init_train_config(args, logger, print_config=True):
     config["do_val"] = args.do_val
     config["do_test"] = args.do_test
     config["batch_size"] = args.batch_size
+    config["vocab_size"] = args.vocab_size
     config["epoch"] = args.epoch
     config["pad_id"] = args.padding_id
+    config["mask_id"] = args.mask_id
+    config["e_mask_id"] = args.e_mask_id
     config["learning_rate"] = args.learning_rate
     config["weight_decay"] = args.weight_decay
     config["use_cuda"] = args.use_cuda

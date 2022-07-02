@@ -118,15 +118,16 @@ def main():
         args.true_triple_path = os.path.join(args.data_root, args.true_triple_file)
         args.vocab_path = os.path.join(args.data_root, args.vocab_file)
 
-        val_dataset = KBCDataset(data_dir=args.data_root,
-                                 do_train=False,
-                                 do_eval=True,
-                                 do_test=False,
-                                 max_seq_len=1024,
-                                 vocab_size=args.vocab_size)
+
         train_dataset = KBCDataset(data_dir=args.data_root,
                                  do_train=True,
                                  do_eval=False,
+                                 do_test=False,
+                                 max_seq_len=1024,
+                                 vocab_size=args.vocab_size)
+        val_dataset = KBCDataset(data_dir=args.data_root,
+                                 do_train=False,
+                                 do_eval=True,
                                  do_test=False,
                                  max_seq_len=1024,
                                  vocab_size=args.vocab_size)
@@ -165,6 +166,9 @@ def main():
     args.gpus = len(device_ids)
 
     args.mask_id = train_dataset.mask_id
+    args.e_mask_id = train_dataset.e_mask_id
+    args.vocab_size = train_dataset.vocab_size
+
     coke_config = init_coke_net_config(args, logger, print_config=True)
     if args.model_name == 'coke_roberta':
         model = CoKE_Roberta(config=coke_config)
@@ -187,7 +191,6 @@ def main():
     # training
     # ------------
     train_config = init_train_config(args, logger, print_config=True)
-
     if args.bmtrain:
         optimizer = bmt.optim.AdamOptimizer(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
         scheduler = bmt.lr_scheduler.Noam(
@@ -197,7 +200,7 @@ def main():
             end_iter=args.epoch,
             num_iter=args.warmup_epoch / 2
         )
-        loss_function = bmt.loss.FusedCrossEntropy(ignore_index=train_dataset.pad_id)
+        loss_function = bmt.loss.FusedCrossEntropy(ignore_index=0)
         bmt.synchronize()
     else:
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -214,7 +217,7 @@ def main():
             scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=args.warmup_epoch)
         else:
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)
-        loss_function = nn.CrossEntropyLoss()
+        loss_function = nn.CrossEntropyLoss(ignore_index=0)
     # for name, parms in model.named_parameters():
     #     print('-->name:', name)
 

@@ -27,6 +27,7 @@ class CoKE(nn.Module):
         self.weight_sharing = config['weight_sharing']
         self.initializer_range = config['initializer_range']
         self.mask_id = config['mask_id']
+        self.e_mask_id = config['e_mask_id']
         # embedding layer
         self.embedding_layer = nn.ModuleDict({
             'word_embedding': nn.Embedding(num_embeddings=self.voc_size, embedding_dim=self.emb_size, padding_idx=1),
@@ -35,10 +36,10 @@ class CoKE(nn.Module):
             'dropout': nn.Dropout(p=self.dropout)
         })
 
+        self.config = BertConfig.from_pretrained(
+            pretrained_model_name_or_path='/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/')
         self.bert = BertModel.from_pretrained(
-            pretrained_model_name_or_path='/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/'
-        )
-
+            pretrained_model_name_or_path='/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/')
         self.config = self.bert.config
         self.dropout_layer = nn.Dropout(self.dropout)
         self.classifier = nn.Linear(self.config.hidden_size, 2)
@@ -62,11 +63,18 @@ class CoKE(nn.Module):
         self.linear2 = nn.Linear(in_features=self.config.hidden_size, out_features=self.config.vocab_size, bias=True)
         # self.linear2.weight = self.embedding_layer["word_embedding"].weight
 
-        self.fc = nn.Sequential(
-            self.linear1,
+        self.mlm_fc = nn.Sequential(
+            nn.Linear(in_features=self.config.hidden_size, out_features=self.config.hidden_size),
             nn.GELU(),
-            self.layer_norm,
-            self.linear2
+            nn.LayerNorm(self.config.hidden_size, eps=1e-12),
+            nn.Linear(in_features=self.config.hidden_size, out_features=self.config.vocab_size, bias=True)
+        )
+
+        self.mem_fc = nn.Sequential(
+            nn.Linear(in_features=self.config.hidden_size, out_features=self.config.hidden_size),
+            nn.GELU(),
+            nn.LayerNorm(self.config.hidden_size, eps=1e-12),
+            nn.Linear(in_features=self.config.hidden_size, out_features=self.config.vocab_size, bias=True)
         )
         self.init_parameters()
         self.tokenizer = None
@@ -114,6 +122,8 @@ class CoKE(nn.Module):
         input_mask = input_map['input_mask'].squeeze()
         position_ids = input_map['position_ids'].squeeze()
         segment_ids = input_map['segment_ids'].squeeze()
+        mlm_mask_pos = input_map['mlm_mask_pos'].squeeze()
+        mem_mask_pos = input_map['mem_mask_pos'].squeeze()
         # input_mask = input_map['input_mask'].squeeze(dim=1)
         # emb_out = self.embedding_layer["word_embedding"](src_ids) + \
         #           self.embedding_layer["position_embedding"](position_ids)
@@ -137,9 +147,9 @@ class CoKE(nn.Module):
             attention_mask=input_mask
         )
 
-        pooled_output = enc_out.pooler_output
-        pooled_output = self.dropout_layer(pooled_output)
-        pooled_output = self.classifier(pooled_output)
+        # pooled_output = enc_out.pooler_output
+        # pooled_output = self.dropout_layer(pooled_output)
+        # pooled_output = self.classifier(pooled_output)
 
         last_hidden_state = enc_out.last_hidden_state
         # method 1
@@ -154,12 +164,12 @@ class CoKE(nn.Module):
         # enc_out = enc_out.transpose(0, 1)
         # enc_out = enc_out[src_ids == 50264]
         # # method 4
-        last_hidden_state = last_hidden_state[src_ids==103]
-
-        logits = self.fc(last_hidden_state)
+        mlm_last_hidden_state = self.mlm_fc(last_hidden_state[src_ids == self.mask_id])
+        mem_last_hidden_state = self.mem_fc(last_hidden_state[src_ids == self.e_mask_id])
         output_map = {
-            'logits': logits,
-            'pooled_output': pooled_output
+            'mlm_last_hidden_state': mlm_last_hidden_state,
+            'mem_last_hidden_state': mem_last_hidden_state
+            # 'pooled_output': pooled_output
         }
         return output_map
 

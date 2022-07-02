@@ -223,17 +223,30 @@ class FeedForward(bmt.DistributedModule):
 class CoKE_BMT(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
-        config = BertConfig.from_pretrained("bert-base-uncased")
+        # config = BertConfig.from_pretrained("/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/")
+        self.config = BertConfig.from_pretrained("bert-base-uncased")
+        # self.bert = Bert.from_pretrained("/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/")
         self.bert = Bert.from_pretrained("bert-base-uncased")
-        self.dense = Linear(config.dim_model, 2)
+        self.dense = Linear(768, 2)
         bmt.init_parameters(self.dense)
-        self.ffn = FeedForward(
-            dim_in=config.dim_model,
-            dim_ff=config.dim_model,
-            dim_out=config.vocab_size,
+        self.mask_id = config['mask_id']
+        self.e_mask_id = config['e_mask_id']
+        self.mlm_ffn = FeedForward(
+            dim_in=768,
+            dim_ff=768,
+            dim_out=30522,
             init_mean=0.0,
             init_std=0.02,
-            dropout_p=0
+            dropout_p=0.15
+        )
+
+        self.mem_ffn = FeedForward(
+            dim_in=768,
+            dim_ff=768,
+            dim_out=30522,
+            init_mean=0.0,
+            init_std=0.02,
+            dropout_p=0.15
         )
 
     def forward(self, input_map):
@@ -247,9 +260,14 @@ class CoKE_BMT(torch.nn.Module):
             token_type_ids=segment_ids,
             attention_mask=input_mask,
         ).last_hidden_state
-        last_hidden_state = last_hidden_state[src_ids == 103]
-        last_hidden_state = self.ffn(last_hidden_state)
-        return {'logits': last_hidden_state}
+        mlm_last_hidden_state = self.mlm_ffn(last_hidden_state[src_ids == self.mask_id])
+        mem_last_hidden_state = self.mem_ffn(last_hidden_state[src_ids == self.e_mask_id])
+        output_map = {
+            'mlm_last_hidden_state': mlm_last_hidden_state,
+            'mem_last_hidden_state': mem_last_hidden_state
+            # 'pooled_output': pooled_output
+        }
+        return output_map
 
 # import bmtrain as bmt
 # bmt.init_distributed(seed=0)
