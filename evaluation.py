@@ -237,6 +237,9 @@ def main():
         state_dict = torch.load(args.checkpoint, map_location=device)
         model.load_state_dict(state_dict)
         model.to(device=device)
+        for name, param in model.named_parameters():
+            print("name:{}".format(name))
+            print(param)
 
     # ------------
     # evaluation

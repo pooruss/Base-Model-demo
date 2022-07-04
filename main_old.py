@@ -4,19 +4,17 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from models.bigmodel import CoKE, CoKE_Roberta, CoKE_BMT
-from data.base_dataset import BaseDataset
+from data.coke_dataset import KBCDataset, PathqueryDataset
 from config import init_coke_net_config, init_train_config
-from trainer import Trainer
+from trainer_old import Trainer
 import math
 import logging
 import argparse
 from config.args import ArgumentGroup
 from model_center.dataset import DistributedDataLoader
+#import wandb
 
-
-# import wandb
-
-# wandb.init(project="CoKE", entity="pooruss")
+#wandb.init(project="CoKE", entity="pooruss")
 
 
 def boolean_string(s):
@@ -44,11 +42,11 @@ model_g = ArgumentGroup(parser, "model", "model configuration and paths.")
 model_g.add_arg("hidden_size", int, 256, "CoKE model config: hidden size, default 256")
 model_g.add_arg("num_hidden_layers", int, 12, "CoKE model config: num_hidden_layers, default 12")
 model_g.add_arg("num_attention_heads", int, 4, "CoKE model config: num_attention_heads, default 4")
-model_g.add_arg("num_relations", int, 1345, "CoKE model config: vocab_size")
-model_g.add_arg("max_position_embeddings", int, 1024, "CoKE model config: max_position_embeddings")
+model_g.add_arg("num_relations", int, 237 , "CoKE model config: vocab_size")
+model_g.add_arg("max_position_embeddings", int, 40, "CoKE model config: max_position_embeddings")
 model_g.add_arg("dropout", float, 0.1, "CoKE model config: dropout, default 0.1")
-model_g.add_arg("hidden_dropout", float, 0.1, "CoKE model config: attention_probs_dropout_prob, default 0.1")
-model_g.add_arg("attention_dropout", float, 0.1,
+model_g.add_arg("hidden_dropout", float, 0.5, "CoKE model config: attention_probs_dropout_prob, default 0.1")
+model_g.add_arg("attention_dropout", float, 0.5,
                 "CoKE model config: attention_probs_dropout_prob, default 0.1")
 model_g.add_arg("initializer_range", int, 0.02, "CoKE model config: initializer_range")
 model_g.add_arg("intermediate_size", int, 512, "CoKE model config: intermediate_size, default 512")
@@ -69,7 +67,7 @@ log_g.add_arg("skip_steps", int, 30, "The steps interval to print loss.")
 data_g = ArgumentGroup(parser, "data", "Data paths, vocab paths and data processing options")
 data_g.add_arg("dataset", str, "FB15K", "dataset name")
 data_g.add_arg("vocab_file", str, 'vocab.txt', "Vocab path.")
-data_g.add_arg("train_file", str, 'train.coke.txt', "Train data for coke.")
+data_g.add_arg("train_file", str, 'train.coke.demo.txt', "Train data for coke.")
 data_g.add_arg("valid_file", str, 'valid.coke.txt', "Valid data for coke.")
 data_g.add_arg("test_file", str, 'test.coke.txt', "Test data for coke.")
 data_g.add_arg("dev_file", str, 'dev.coke.txt', "Dev data for coke.")
@@ -80,8 +78,7 @@ data_g.add_arg("sen_trivial_file", str, 'trival_sen.txt',
                "trivial sentence file for pathquery evaluation. Only used for path query datasets")
 
 parser.add_argument("--task_name", default='path', type=str, required=True, help="path or triple.")
-parser.add_argument("--data_root", default='/home/wanghuadong/liangshihao/kg-bert-master/data/FB15k-237/', type=str,
-                    required=True, help="data directory.")
+parser.add_argument("--data_root", default='./data/FB15K/', type=str, required=True, help="data directory.")
 parser.add_argument("--vocab_size", default=16396, type=int, required=True, help="16396 for fb15k, 75169 for pathFB.")
 parser.add_argument("--max_seq_len", default=7, type=int, required=True, help="sequence length.")
 parser.add_argument("--epoch", default=400, type=int, required=True, help="epoch.")
@@ -101,7 +98,7 @@ parser.add_argument("--use_pretrain", default=False, type=boolean_string, requir
 
 args = parser.parse_args()
 
-# wandb.config.update(args)
+#wandb.config.update(args)
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
@@ -120,41 +117,37 @@ def main():
         args.valid_data_path = os.path.join(args.data_root, args.valid_file)
         args.true_triple_path = os.path.join(args.data_root, args.true_triple_file)
         args.vocab_path = os.path.join(args.data_root, args.vocab_file)
+        train_dataset = KBCDataset(vocab_path=args.vocab_path,
+                                   data_path=args.train_data_path,
+                                   max_seq_len=args.max_seq_len,
+                                   vocab_size=args.vocab_size)
 
-        train_dataset = BaseDataset(data_dir=args.data_root,
-                                    do_train=True,
-                                    do_eval=False,
-                                    do_test=False,
-                                    max_seq_len=512)
-        # val_dataset = BaseDataset(data_dir=args.data_root,
-        #                           do_train=False,
-        #                           do_eval=True,
-        #                           do_test=False,
-        #                           max_seq_len=512)
-        val_dataset = train_dataset
+        val_dataset = KBCDataset(vocab_path=args.vocab_path,
+                                 data_path=args.valid_data_path,
+                                 max_seq_len=args.max_seq_len,
+                                 vocab_size=args.vocab_size)
     else:
         args.train_data_path = os.path.join(args.data_root, args.train_file)
         args.valid_data_path = os.path.join(args.data_root, args.test_file)
         args.sen_candli_path = os.path.join(args.data_root, args.sen_candli_file)
         args.sen_trivial_path = os.path.join(args.data_root, args.sen_trivial_file)
         args.vocab_path = os.path.join(args.data_root, args.vocab_file)
-        train_dataset = BaseDataset(data_dir=args.data_root,
-                                    do_train=True,
-                                    do_eval=False,
-                                    do_test=False,
-                                    max_seq_len=512)
-        val_dataset = BaseDataset(data_dir=args.data_root,
-                                  do_train=False,
-                                  do_eval=True,
-                                  do_test=False,
-                                  max_seq_len=512)
+        train_dataset = PathqueryDataset(vocab_path=args.vocab_path,
+                                         data_path=args.train_data_path,
+                                         max_seq_len=args.max_seq_len,
+                                         vocab_size=args.vocab_size)
+
+        val_dataset = PathqueryDataset(vocab_path=args.vocab_path,
+                                       data_path=args.valid_data_path,
+                                       max_seq_len=args.max_seq_len,
+                                       vocab_size=args.vocab_size)
 
     if args.bmtrain:
-        train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True)
-        val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=args.batch_size, shuffle=True)
+        train_loader = DistributedDataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True)
+        val_loader = DistributedDataLoader(dataset=val_dataset, batch_size=args.batch_size, shuffle=False)
     else:
         train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
+        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
     args.padding_id = train_dataset.pad_id
 
     # ------------
@@ -165,10 +158,6 @@ def main():
         device_ids.append(int(gpu_id))
     device = torch.device('cuda:{}'.format(device_ids[0]) if args.use_cuda else 'cpu')
     args.gpus = len(device_ids)
-
-    args.mask_id = train_dataset.mask_id
-    args.e_mask_id = train_dataset.e_mask_id
-    args.vocab_size = train_dataset.vocab_size
 
     coke_config = init_coke_net_config(args, logger, print_config=True)
     if args.model_name == 'coke_roberta':
@@ -181,17 +170,17 @@ def main():
         bmt.synchronize()
     else:
         model = CoKE(config=coke_config)
-        model.tokenizer = train_dataset.tokenizer
         if args.use_pretrain:
             model.load_pretrained_embedding(args.pretrained_embed_path)
-
+        model.to(device=device)
         if args.gpus > 1:
             model = nn.DataParallel(model, device_ids=device_ids)
-        model.to(device=device)
+
     # ------------
     # training
     # ------------
     train_config = init_train_config(args, logger, print_config=True)
+
     if args.bmtrain:
         optimizer = bmt.optim.AdamOptimizer(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
         scheduler = bmt.lr_scheduler.Noam(
@@ -201,7 +190,7 @@ def main():
             end_iter=args.epoch,
             num_iter=args.warmup_epoch / 2
         )
-        loss_function = bmt.loss.FusedCrossEntropy(ignore_index=0)
+        loss_function = bmt.loss.FusedCrossEntropy(ignore_index=train_dataset.pad_id)
         bmt.synchronize()
     else:
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -218,7 +207,7 @@ def main():
             scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=args.warmup_epoch)
         else:
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)
-        loss_function = nn.CrossEntropyLoss(ignore_index=0)
+        loss_function = nn.CrossEntropyLoss()
     # for name, parms in model.named_parameters():
     #     print('-->name:', name)
 

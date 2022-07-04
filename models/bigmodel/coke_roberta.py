@@ -15,7 +15,7 @@ class CoKE_Roberta(nn.Module):
 
     # TODO: soft label, attn_mask scale, activation function.
     def __init__(self, config: argparse.Namespace):
-        super().__init__(config)
+        super().__init__()
         self.max_seq_len = config['max_seq_len']
         self.emb_size = config['hidden_size']
         self.n_layer = config['num_hidden_layers']
