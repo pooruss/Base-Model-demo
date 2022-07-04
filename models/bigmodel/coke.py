@@ -164,8 +164,10 @@ class CoKE(nn.Module):
         # enc_out = enc_out.transpose(0, 1)
         # enc_out = enc_out[src_ids == 50264]
         # # method 4
-        mlm_last_hidden_state = self.mlm_fc(last_hidden_state[src_ids == self.mask_id])
-        mem_last_hidden_state = self.mem_fc(last_hidden_state[src_ids == self.e_mask_id])
+        mlm_last_hidden_state = last_hidden_state.view(-1, self.config.hidden_size)[mlm_mask_pos.view(-1)]
+        mlm_last_hidden_state = self.mlm_fc(mlm_last_hidden_state.view(-1, self.config.hidden_size))
+        mem_last_hidden_state = last_hidden_state.view(-1, self.config.hidden_size)[mem_mask_pos.view(-1)]
+        mem_last_hidden_state = self.mem_fc(mem_last_hidden_state.view(-1, self.config.hidden_size))
         output_map = {
             'mlm_last_hidden_state': mlm_last_hidden_state,
             'mem_last_hidden_state': mem_last_hidden_state

@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from models.bigmodel import CoKE, CoKE_Roberta, CoKE_BMT
-from data.ecoke_dataset import KBCDataset, PathqueryDataset
+from data.base_dataset import BaseDataset
 from config import init_coke_net_config, init_train_config
 from trainer import Trainer
 import math
@@ -12,6 +12,8 @@ import logging
 import argparse
 from config.args import ArgumentGroup
 from model_center.dataset import DistributedDataLoader
+
+
 # import wandb
 
 # wandb.init(project="CoKE", entity="pooruss")
@@ -78,7 +80,8 @@ data_g.add_arg("sen_trivial_file", str, 'trival_sen.txt',
                "trivial sentence file for pathquery evaluation. Only used for path query datasets")
 
 parser.add_argument("--task_name", default='path', type=str, required=True, help="path or triple.")
-parser.add_argument("--data_root", default='/home/wanghuadong/liangshihao/kg-bert-master/data/FB15k-237/', type=str, required=True, help="data directory.")
+parser.add_argument("--data_root", default='/home/wanghuadong/liangshihao/kg-bert-master/data/FB15k-237/', type=str,
+                    required=True, help="data directory.")
 parser.add_argument("--vocab_size", default=16396, type=int, required=True, help="16396 for fb15k, 75169 for pathFB.")
 parser.add_argument("--max_seq_len", default=7, type=int, required=True, help="sequence length.")
 parser.add_argument("--epoch", default=400, type=int, required=True, help="epoch.")
@@ -118,19 +121,16 @@ def main():
         args.true_triple_path = os.path.join(args.data_root, args.true_triple_file)
         args.vocab_path = os.path.join(args.data_root, args.vocab_file)
 
-
-        train_dataset = KBCDataset(data_dir=args.data_root,
-                                 do_train=True,
-                                 do_eval=False,
-                                 do_test=False,
-                                 max_seq_len=1024,
-                                 vocab_size=args.vocab_size)
-        val_dataset = KBCDataset(data_dir=args.data_root,
-                                 do_train=False,
-                                 do_eval=True,
-                                 do_test=False,
-                                 max_seq_len=1024,
-                                 vocab_size=args.vocab_size)
+        train_dataset = BaseDataset(data_dir=args.data_root,
+                                    do_train=True,
+                                    do_eval=False,
+                                    do_test=False,
+                                    max_seq_len=512)
+        val_dataset = BaseDataset(data_dir=args.data_root,
+                                  do_train=False,
+                                  do_eval=True,
+                                  do_test=False,
+                                  max_seq_len=512)
         # val_dataset = train_dataset
     else:
         args.train_data_path = os.path.join(args.data_root, args.train_file)
@@ -138,15 +138,16 @@ def main():
         args.sen_candli_path = os.path.join(args.data_root, args.sen_candli_file)
         args.sen_trivial_path = os.path.join(args.data_root, args.sen_trivial_file)
         args.vocab_path = os.path.join(args.data_root, args.vocab_file)
-        train_dataset = PathqueryDataset(vocab_path=args.vocab_path,
-                                         data_path=args.train_data_path,
-                                         max_seq_len=args.max_seq_len,
-                                         vocab_size=args.vocab_size)
-
-        val_dataset = PathqueryDataset(vocab_path=args.vocab_path,
-                                       data_path=args.valid_data_path,
-                                       max_seq_len=args.max_seq_len,
-                                       vocab_size=args.vocab_size)
+        train_dataset = BaseDataset(data_dir=args.data_root,
+                                    do_train=True,
+                                    do_eval=False,
+                                    do_test=False,
+                                    max_seq_len=512)
+        val_dataset = BaseDataset(data_dir=args.data_root,
+                                  do_train=False,
+                                  do_eval=True,
+                                  do_test=False,
+                                  max_seq_len=512)
 
     if args.bmtrain:
         train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True)

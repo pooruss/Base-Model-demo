@@ -151,7 +151,7 @@ class Trainer():
         if self.use_ema:
             self.ema_model.apply_shadow()
         self.model.eval()
-        acc, loss_sum, total_acc = 0.0, 0.0, 0.0
+        acc, mlm_loss_sum, mem_loss_sum, mlm_total_acc, mem_total_acc = 0.0, 0.0, 0.0, 0.0, 0.0
         step_per_epoch = len(self.val_data_loader)
         print("----------- validation -----------")
         self.log_file.write(str(len(self.val_data_loader)) + '\n')
@@ -159,18 +159,20 @@ class Trainer():
             # fetch batch data
             try:
                 src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, \
-                mem_label_ids, mem_mask_pos = batch_data
+                mem_label_ids = batch_data
             except RuntimeError:
                 print("One data instance's length should be 5, received {}.".format(len(batch_data)))
                 continue
             if self.use_cuda:
-                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, mem_mask_pos = \
+                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids = \
                     src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
-                    pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device), \
-                    mem_mask_pos.to(self.device)
+                    pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device)
 
-            mlm_mask_pos = torch.argwhere(src_ids.reshape(-1) == self.mask_id)
-            mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos]
+            with torch.no_grad():
+                mlm_mask_pos = torch.argwhere(mlm_label_ids.reshape(-1) > 0)
+                mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos].squeeze()
+                mem_mask_pos = torch.argwhere(mem_label_ids.reshape(-1) > 0)
+                mem_label_ids = mem_label_ids.view(-1)[mem_mask_pos].squeeze()
 
             input_x = {
                 'src_ids': src_ids,
@@ -200,82 +202,89 @@ class Trainer():
 
             if self.bmtrain:
                 loss = (mlm_loss + mem_loss)
-                global_loss = bmt.sum_loss(loss).item()
-                loss = self.optimizer.loss_scale(loss)
-                loss_sum += global_loss
+                mlm_global_loss = bmt.sum_loss(mlm_loss).item()
+                mem_global_loss = bmt.sum_loss(mem_loss).item()
+                mlm_loss_sum += mlm_global_loss
+                mem_loss_sum += mem_global_loss
             else:
-                loss_sum += (mlm_loss.data + mem_loss.data)
-            acc = mem_last_hidden_state.max(dim=1)[1].eq(mem_label_ids.squeeze()).sum()
-            total_acc += (acc * 100 / mem_label_ids.size(0))
+                mlm_loss_sum += mlm_loss.data
+                mem_loss_sum += mem_loss.data
+            mlm_acc = mlm_last_hidden_state.max(dim=1)[1].eq(mlm_label_ids.squeeze()).sum()
+            mlm_total_acc += (mlm_acc * 100 / mlm_label_ids.size(0))
+            mem_acc = mem_last_hidden_state.max(dim=1)[1].eq(mem_label_ids.squeeze()).sum()
+            mem_total_acc += (mem_acc * 100 / mem_label_ids.size(0))
 
         # acc = acc * 100 / float(len(self.val_data_loader.dataset))
-        total_acc = total_acc / float(len(self.val_data_loader))
-        loss_sum = loss_sum / len(self.val_data_loader)
-        if not self.bmtrain:
-            loss_sum = loss_sum.cpu().detach().numpy()
+        mlm_total_acc = mlm_total_acc / float(len(self.val_data_loader))
+        mem_total_acc = mem_total_acc / float(len(self.val_data_loader))
+        mlm_loss_sum = mlm_loss_sum / len(self.val_data_loader)
+        mem_loss_sum = mem_loss_sum / len(self.val_data_loader)
         if self.bmtrain:
-            bmt.print_rank('loss:{}, acc:{}.'.format(str(loss_sum), str(acc)))
+            bmt.print_rank('mlm_loss:{}, acc:{}%, mem_loss:{}, acc:{}%.'.format(
+                str(mlm_loss_sum), str(mlm_total_acc.cpu().detach().numpy()), str(mem_loss_sum), str(mem_total_acc.cpu().detach().numpy())))
             bmt.synchronize()
         else:
-            print('val mem_loss:{}, val acc:{}.'.format(str(mem_loss.cpu().detach().numpy()), str(acc)))
+            print('mlm_loss:{}, acc:{}%, mem_loss:{}, acc:{}%.'.format(
+                str(mlm_loss_sum), str(mlm_total_acc), str(mem_loss_sum), str(mem_total_acc)))
         # wandb.log({"validation loss": loss_sum})
-        self.log_file.write(('loss:{}, acc:{}%.'.format(str(loss_sum), str(acc))) + '\n')
+        self.log_file.write(('mlm_loss:{}, acc:{}%, mem_loss:{}, acc:{}%.'.format(
+            str(mlm_loss_sum), str(mlm_total_acc.cpu().detach().numpy()), str(mem_loss_sum), str(mem_total_acc.cpu().detach().numpy()))) + '\n')
 
         # save best checkpoint
-        if self.last_loss <= loss_sum:
-            self.save = True
-        self.last_loss = loss_sum
-        if self.best_loss > loss_sum and self.save:
-            self.best_loss = loss_sum
-            if self.use_ema:
-                self.ema_model.apply_shadow()
-            if isinstance(self.model, torch.nn.DataParallel):
-                torch.save(self.model.module.state_dict(), self.save_path + '{}_lr{}_bs{}_ema{}_epoch{}.pt'.format(
-                    self.model_name, self.learning_rate,
-                    self.batch_size, str(self.use_ema), str(epoch)))
-            elif self.bmtrain:
-                bmt.save(self.model, self.save_path + '{}_bmt_lr{}_bs{}_ema{}_epoch{}.pt'.format(
-                    self.model_name, self.learning_rate,
-                    self.batch_size, str(self.use_ema), str(epoch)))
-            else:
-                torch.save(self.model.state_dict(), self.save_path + '{}_lr{}_bs{}_ema{}_epoch{}.pt'.format(
-                    self.model_name, self.learning_rate,
-                    self.batch_size, str(self.use_ema), str(epoch)))
-            if self.use_ema:
-                self.ema_model.restore()
+        # if self.last_loss <= mem_loss_sum:
+        #     self.save = True
+        # self.last_loss = mem_loss_sum
+        # if self.best_loss > mem_loss_sum and self.save:
+        #     self.best_loss = mem_loss_sum
+        #     if self.use_ema:
+        #         self.ema_model.apply_shadow()
+        #     if isinstance(self.model, torch.nn.DataParallel):
+        #         torch.save(self.model.module.state_dict(), self.save_path + '{}_lr{}_bs{}_ema{}_epoch{}.pt'.format(
+        #             self.model_name, self.learning_rate,
+        #             self.batch_size, str(self.use_ema), str(epoch)))
+        #     elif self.bmtrain:
+        #         bmt.save(self.model, self.save_path + '{}_bmt_lr{}_bs{}_ema{}_epoch{}.pt'.format(
+        #             self.model_name, self.learning_rate,
+        #             self.batch_size, str(self.use_ema), str(epoch)))
+        #     else:
+        #         torch.save(self.model.state_dict(), self.save_path + '{}_lr{}_bs{}_ema{}_epoch{}.pt'.format(
+        #             self.model_name, self.learning_rate,
+        #             self.batch_size, str(self.use_ema), str(epoch)))
+        #     if self.use_ema:
+        #         self.ema_model.restore()
 
         if self.use_ema:
             self.ema_model.restore()
 
     def train(self):
         self.model.train()
-        self.model.float()
         if self.use_ema:
             self.ema_model.register()
-        acc, loss_sum = 0.0, 0.0
         step_per_epoch = len(self.train_data_loader)
         total_train_step = step_per_epoch * self.epoch
         save_step = math.ceil(total_train_step / self.node / self.gpus / self.checkpoint_num)
         for epoch in range(self.epoch):
+            acc, mlm_loss_sum, mem_loss_sum, mlm_total_acc, mem_total_acc = 0.0, 0.0, 0.0, 0.0, 0.0
             start_time = time.time()
             # label_smoothing = 0.0 if epoch < 5 else 0.0
             for iter, batch_data in enumerate(self.train_data_loader):
                 # fetch batch data
                 try:
                     src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, \
-                    mem_label_ids, mem_mask_pos = batch_data
+                    mem_label_ids = batch_data
                 except RuntimeError:
                     print("One data instance's length should be 5, received {}.".format(len(batch_data)))
                     continue
                 if self.use_cuda:
-                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, mem_mask_pos = \
+                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids = \
                         src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
-                        pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device), \
-                        mem_mask_pos.to(self.device)
+                        pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device)
+
                 with torch.no_grad():
-                    mlm_mask_pos = torch.argwhere(src_ids.reshape(-1) == self.mask_id)
+                    mlm_mask_pos = torch.argwhere(mlm_label_ids.reshape(-1) > 0)
                     mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos].squeeze()
-                    mem_label_ids = mem_label_ids.view(-1, 1).squeeze()
+                    mem_mask_pos = torch.argwhere(mem_label_ids.reshape(-1) > 0)
+                    mem_label_ids = mem_label_ids.view(-1)[mem_mask_pos].squeeze()
                 input_x = {
                     'src_ids': src_ids,
                     'input_mask': input_mask,
@@ -311,18 +320,19 @@ class Trainer():
 
                 # backward
                 if self.bmtrain:
-                    loss = mlm_loss
-                    global_loss = bmt.sum_loss(loss).item()
+                    mlm_global_loss = bmt.sum_loss(mlm_loss).item()
+                    mem_global_loss = bmt.sum_loss(mem_loss).item()
+                    mlm_loss_sum += mlm_global_loss
+                    mem_loss_sum += mem_global_loss
+                    loss = mlm_loss + mem_loss
                     loss = self.optimizer.loss_scale(loss)
                     loss.mean().backward()
-                    loss = mem_loss
-                    global_loss = bmt.sum_loss(loss).item()
-                    loss = self.optimizer.loss_scale(loss)
-                    loss.backward()
                     bmt.optim_step(self.optimizer)
                     lr = self.lr_scheduler.get_lr()
                     torch.cuda.synchronize()
                 else:
+                    mlm_loss_sum += mlm_loss.data
+                    mem_loss_sum += mem_loss.data
                     loss = mlm_loss + mem_loss
                     loss.mean().backward()
                     self.optimizer.step()
@@ -332,46 +342,72 @@ class Trainer():
 
                 # log
                 # print(logits.max(dim=1)[1])
-                acc = mem_last_hidden_state.max(dim=1)[1].eq(mem_label_ids.squeeze()).sum()
-                acc = acc * 100 / mem_label_ids.size(0)
+
+                mlm_acc = mlm_last_hidden_state.max(dim=1)[1].eq(mlm_label_ids).sum()
+                mem_acc = mem_last_hidden_state.max(dim=1)[1].eq(mem_label_ids).sum()
+                mlm_total_acc += (mlm_acc * 100 / mlm_label_ids.size(0))
+                mem_total_acc += (mem_acc * 100 / mem_label_ids.size(0))
                 current_step = epoch * step_per_epoch + iter
 
-                if iter % (step_per_epoch / 16) == 0 or iter + 1 == step_per_epoch:
+                if iter % (step_per_epoch / 8) == 0 or iter + 1 == step_per_epoch:
+                    mlm_total_acc_ = mlm_total_acc / (iter + 1.0)
+                    mem_total_acc_ = mem_total_acc / (iter + 1.0)
+                    mlm_loss_sum_ = mlm_loss_sum / (iter + 1.0)
+                    mem_loss_sum_ = mem_loss_sum / (iter + 1.0)
                     if not self.bmtrain:
-                        print('Epoch:{}, Step:{}/{}, mlm_loss:{}, mem_loss:{}, cls_acc:{}%, lr:{}.'.format(
+                        print('Epoch:{}, Step:{}/{}, mlm_loss:{}, mem_acc:{}%, mem_loss:{}, mem_acc:{}%, lr:{}.'.format(
                             str(epoch), str(current_step),
                             str(total_train_step),
-                            str(mlm_loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
-                            str(mem_loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
-                            str(acc.cpu().detach().numpy()), str(lr)
+                            str(mlm_loss_sum_.cpu().detach().numpy()),
+                            str(mlm_total_acc_.cpu().detach().numpy()),
+                            str(mem_loss_sum_.cpu().detach().numpy()),
+                            str(mem_total_acc_.cpu().detach().numpy()), str(lr)
                         )
                         )
                     else:
-                        bmt.print_rank('Epoch:{}, Step:{}/{}, mlm_loss:{}, mem_loss:{}, cls_acc:{}%, lr:{}.'.format(
+                        bmt.print_rank('Epoch:{}, Step:{}/{}, mlm_loss:{}, mem_acc:{}%, mem_loss:{}, mem_acc:{}%, '
+                                       'lr:{}.'.format(
                             str(epoch), str(current_step),
                             str(total_train_step),
-                            str(mlm_loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
-                            str(mem_loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
-                            str(acc.cpu().detach().numpy()), str(lr)
+                            str(mlm_loss_sum_),
+                            str(mlm_total_acc_.cpu().detach().numpy()),
+                            str(mem_loss_sum_),
+                            str(mem_total_acc_.cpu().detach().numpy()), str(lr)
                         )
                         )
 
                         # bmt.synchronize()
                     # wandb.log({
-                    #     "training loss": loss.cpu().detach().numpy(),
+                    #     "training loss": loss,
                     # })
 
-                    self.log_file.write('Epoch:{}, Step:{}/{}, loss:{}, acc:{}%, lr:{}.'.format(
-                        str(epoch), str(current_step),
-                        str(total_train_step),
-                        str(loss.cpu().detach().numpy() if not self.bmtrain else global_loss),
-                        str(acc.cpu().detach().numpy()), str(lr)) + '\n'
-                                        )
+                    self.log_file.write(
+                        'Epoch:{}, Step:{}/{}, mlm_loss:{}, mem_acc:{}%, mem_loss:{}, mem_acc:{}%, lr:{}.'.format(
+                            str(epoch), str(current_step),
+                            str(total_train_step),
+                            str(mlm_loss_sum_),
+                            str(mlm_total_acc_.cpu().detach().numpy()),
+                            str(mem_loss_sum_),
+                            str(mem_total_acc_.cpu().detach().numpy()), str(lr)
+                        ) + '\n')
                     self.log_file.flush()
             # wandb.log({
             #     "learning rate": np.array(float(lr))
             # })
             # torch.cuda.synchronize()
+            if (epoch+1) % 3 == 0:
+                if isinstance(self.model, torch.nn.DataParallel):
+                    torch.save(self.model.module.state_dict(), self.save_path + '{}_lr{}_bs{}_ema{}_epoch{}.pt'.format(
+                        self.model_name, self.learning_rate,
+                        self.batch_size, str(self.use_ema), str(epoch)))
+                elif self.bmtrain:
+                    bmt.save(self.model, self.save_path + '{}_bmt_lr{}_bs{}_ema{}_epoch{}.pt'.format(
+                        self.model_name, self.learning_rate,
+                        self.batch_size, str(self.use_ema), str(epoch)))
+                else:
+                    torch.save(self.model.state_dict(), self.save_path + '{}_lr{}_bs{}_ema{}_epoch{}.pt'.format(
+                        self.model_name, self.learning_rate,
+                        self.batch_size, str(self.use_ema), str(epoch)))
             self.validation(epoch)
             epoch_time = time.time() - start_time
             if self.bmtrain:
@@ -381,4 +417,4 @@ class Trainer():
             self.model.train()
             self.lr_scheduler.step() if not self.bmtrain else bmt.optim_step(self.lr_scheduler)
 
-        return acc, loss_sum
+        return acc, mem_loss_sum
