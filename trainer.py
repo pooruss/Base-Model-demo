@@ -425,9 +425,36 @@ class Trainer():
 
     def test(self):
         self.model.eval()
+        preds = []
         for iter, batch_data in tqdm(enumerate(self.test_data_loader)):
 
-        raise NotImplementedError
+            for hits_level in range(10):
+                if rank1 <= hits_level:
+                    hits[hits_level].append(1.0)
+                    hits_left[hits_level].append(1.0)
+                else:
+                    hits[hits_level].append(0.0)
+                    hits_left[hits_level].append(0.0)
+
+                if rank2 <= hits_level:
+                    hits[hits_level].append(1.0)
+                    hits_right[hits_level].append(1.0)
+                else:
+                    hits[hits_level].append(0.0)
+                    hits_right[hits_level].append(0.0)
+
+        for i in [0, 2, 9]:
+            logger.info('Hits left @{0}: {1}'.format(i + 1, np.mean(hits_left[i])))
+            logger.info('Hits right @{0}: {1}'.format(i + 1, np.mean(hits_right[i])))
+            logger.info('Hits @{0}: {1}'.format(i + 1, np.mean(hits[i])))
+        logger.info('Mean rank left: {0}'.format(np.mean(ranks_left)))
+        logger.info('Mean rank right: {0}'.format(np.mean(ranks_right)))
+        logger.info('Mean rank: {0}'.format(np.mean(ranks)))
+        logger.info('Mean reciprocal rank left: {0}'.format(np.mean(1. / np.array(ranks_left))))
+        logger.info('Mean reciprocal rank right: {0}'.format(np.mean(1. / np.array(ranks_right))))
+        logger.info('Mean reciprocal rank: {0}'.format(np.mean(1. / np.array(ranks))))
+
+    raise NotImplementedError
 
 def eval_fn(target, pred_top10):
     index_list = []

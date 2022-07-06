@@ -249,6 +249,7 @@ def main():
 
     print(total_acc, total_loss)
 
+    coke_trainer.test()
 
 if __name__ == '__main__':
     main()
