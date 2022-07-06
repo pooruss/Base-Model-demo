@@ -144,6 +144,9 @@ class Trainer():
     def load_val_data_loader(self, val_data_loader):
         self.val_data_loader = val_data_loader
 
+    def load_test_data_loader(self, test_data_loader):
+        self.test_data_loader = test_data_loader
+
     def prediction(self):
         pass
 
@@ -418,3 +421,7 @@ class Trainer():
             self.lr_scheduler.step() if not self.bmtrain else bmt.optim_step(self.lr_scheduler)
 
         return acc, mem_loss_sum
+
+    def test(self):
+        raise NotImplementedError
+    

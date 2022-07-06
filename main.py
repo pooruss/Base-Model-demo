@@ -131,6 +131,11 @@ def main():
                                   do_eval=True,
                                   do_test=False,
                                   max_seq_len=512)
+        test_dataset = BaseDataset(data_dir=args.data_root,
+                                  do_train=False,
+                                  do_eval=True,
+                                  do_test=False,
+                                  max_seq_len=512)
         # val_dataset = train_dataset
     else:
         args.train_data_path = os.path.join(args.data_root, args.train_file)
@@ -148,13 +153,22 @@ def main():
                                   do_eval=True,
                                   do_test=False,
                                   max_seq_len=512)
+        test_dataset = BaseDataset(data_dir=args.data_root,
+                                   do_train=False,
+                                   do_eval=True,
+                                   do_test=False,
+                                   max_seq_len=512)
 
     if args.bmtrain:
         train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True)
         val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=args.batch_size, shuffle=True)
+        test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=args.batch_size, shuffle=True)
+
     else:
         train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
         val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
+        test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=args.batch_size, shuffle=True)
+
     args.padding_id = train_dataset.pad_id
 
     # ------------
@@ -226,7 +240,7 @@ def main():
 
     coke_trainer.load_train_data_loader(train_loader)
     coke_trainer.load_val_data_loader(val_loader)
-
+    coke_trainer.load_test_data_loader(test_loader)
     coke_trainer.set_loss_function(loss_function)
     coke_trainer.set_optimizer(optimizer)
     coke_trainer.set_lr_scheduler(scheduler)
