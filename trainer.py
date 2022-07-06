@@ -6,6 +6,7 @@ import bmtrain as bmt
 # import wandb
 import numpy as np
 import time
+import tqdm
 
 
 def mask_tokens(vocab_size, tokenizer, inputs, mlm_prob):
@@ -423,5 +424,24 @@ class Trainer():
         return acc, mem_loss_sum
 
     def test(self):
+        self.model.eval()
+        for iter, batch_data in tqdm(enumerate(self.test_data_loader)):
+
         raise NotImplementedError
-    
+
+def eval_fn(target, pred_top10):
+    index_list = []
+    for label, pred in zip(target, pred_top10):
+        if label in pred:
+            this_idx = np.where(pred == label)[0][0]
+        else:
+            this_idx = 10
+        index_list.append(this_idx)
+    index_list = np.array(index_list)
+    # print('index_list: ', index_list)
+    hits1 = float(len(index_list[index_list < 1])) / len(index_list)
+    hits3 = float(len(index_list[index_list < 3])) / len(index_list)
+    hits10 = float(len(index_list[index_list < 10])) / len(index_list)
+    MR = np.mean(index_list)+1
+    MRR = np.mean([1 / (x+1) for x in index_list])
+    return hits1, hits3, hits10, MR, MRR
