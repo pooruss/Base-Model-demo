@@ -4,9 +4,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from models.bigmodel import CoKE, CoKE_Roberta, CoKE_BMT
-from data.base_dataset import BaseDataset
+from data.base_dataset import BaseDataset, AliasDataset, TripleDataset
 from config import init_coke_net_config, init_train_config
 from trainer import Trainer
+from trainer_alias import Trainer_alias
 import math
 import logging
 import argparse
@@ -56,7 +57,7 @@ model_g.add_arg("weight_sharing", bool, True, "If set, share weights between wor
 
 train_g = ArgumentGroup(parser, "training", "training options.")
 train_g.add_arg("node", int, 1, "Node nums.")
-train_g.add_arg("warmup_epoch", int, 40, "Number of epoches for training.")
+train_g.add_arg("warmup_epoch", int, 4, "Number of epoches for training.")
 train_g.add_arg("warmup_proportion", float, 0.1,
                 "Proportion of training steps to perform linear learning rate warmup for.")
 # train_g.add_arg("weight_decay", float, 0.0001, "Weight decay rate for L2 regularizer.")
@@ -115,7 +116,7 @@ def main():
     # ------------
     # data
     # ------------
-    if args.task_name == "triple":
+    if args.task_name == "path_text":
         args.train_data_path = os.path.join(args.data_root, args.train_file)
         args.valid_data_path = os.path.join(args.data_root, args.valid_file)
         args.true_triple_path = os.path.join(args.data_root, args.true_triple_file)
@@ -132,22 +133,38 @@ def main():
                                   do_test=False,
                                   max_seq_len=512)
         # val_dataset = train_dataset
-    else:
+    elif args.task_name == "path_alias":
         args.train_data_path = os.path.join(args.data_root, args.train_file)
         args.valid_data_path = os.path.join(args.data_root, args.test_file)
         args.sen_candli_path = os.path.join(args.data_root, args.sen_candli_file)
         args.sen_trivial_path = os.path.join(args.data_root, args.sen_trivial_file)
         args.vocab_path = os.path.join(args.data_root, args.vocab_file)
-        train_dataset = BaseDataset(data_dir=args.data_root,
-                                    do_train=True,
-                                    do_eval=False,
+        train_dataset = AliasDataset(data_dir=args.data_root,
+                                     do_train=True,
+                                     do_eval=False,
+                                     do_test=False,
+                                     max_seq_len=141)
+        val_dataset = AliasDataset(data_dir=args.data_root,
+                                   do_train=False,
+                                   do_eval=True,
+                                   do_test=False,
+                                   max_seq_len=141)
+    elif args.task_name == "triple_text":
+        args.train_data_path = os.path.join(args.data_root, args.train_file)
+        args.valid_data_path = os.path.join(args.data_root, args.test_file)
+        args.sen_candli_path = os.path.join(args.data_root, args.sen_candli_file)
+        args.sen_trivial_path = os.path.join(args.data_root, args.sen_trivial_file)
+        args.vocab_path = os.path.join(args.data_root, args.vocab_file)
+        train_dataset = TripleDataset(data_dir=args.data_root,
+                                      do_train=True,
+                                      do_eval=False,
+                                      do_test=False,
+                                      max_seq_len=512)
+        val_dataset = TripleDataset(data_dir=args.data_root,
+                                    do_train=False,
+                                    do_eval=True,
                                     do_test=False,
                                     max_seq_len=512)
-        val_dataset = BaseDataset(data_dir=args.data_root,
-                                  do_train=False,
-                                  do_eval=True,
-                                  do_test=False,
-                                  max_seq_len=512)
 
     if args.bmtrain:
         train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True)
@@ -167,7 +184,6 @@ def main():
     args.gpus = len(device_ids)
 
     args.mask_id = train_dataset.mask_id
-    args.e_mask_id = train_dataset.e_mask_id
     args.vocab_size = train_dataset.vocab_size
 
     coke_config = init_coke_net_config(args, logger, print_config=True)
@@ -193,18 +209,31 @@ def main():
     # ------------
     train_config = init_train_config(args, logger, print_config=True)
     if args.bmtrain:
-        optimizer = bmt.optim.AdamOptimizer(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-        scheduler = bmt.lr_scheduler.Noam(
-            optimizer,
+        pretrained_optimizer = bmt.optim.AdamOptimizer(model.bert.parameters(), lr=args.learning_rate,
+                                                       weight_decay=args.weight_decay)
+        optimizer = bmt.optim.AdamOptimizer(model.mlm_ffn.parameters(), lr=args.learning_rate * 5,
+                                            weight_decay=args.weight_decay)
+        pretrained_scheduler = bmt.lr_scheduler.Noam(
+            pretrained_optimizer,
             start_lr=args.learning_rate,
             warmup_iter=args.warmup_epoch,
             end_iter=args.epoch,
             num_iter=args.warmup_epoch / 2
         )
+        scheduler = bmt.lr_scheduler.Noam(
+            optimizer,
+            start_lr=args.learning_rate * 5,
+            warmup_iter=args.warmup_epoch,
+            end_iter=args.epoch,
+            num_iter=args.warmup_epoch / 2
+        )
+
         loss_function = bmt.loss.FusedCrossEntropy(ignore_index=0)
         bmt.synchronize()
     else:
-        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
+        pretrained_optimizer = optim.Adam(model.bert.parameters(), lr=args.learning_rate,
+                                          weight_decay=args.weight_decay)
+        optimizer = optim.Adam(model.mlm_ffn.parameters(), lr=args.learning_rate * 5, weight_decay=args.weight_decay)
         # warm_up_with_cosine_lr
         t = args.warmup_epoch  # warmup
         T = args.epoch
@@ -213,6 +242,7 @@ def main():
                 1 + math.cos(math.pi * (epoch - t) / (T - t))) < 0.1 else n_t * (
                 1 + math.cos(math.pi * (epoch - t) / (T - t)))
         if args.lr_scheduler == "warmup_cosine":
+            pretrained_scheduler = torch.optim.lr_scheduler.LambdaLR(pretrained_optimizer, lr_lambda=lambda1)
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda1)
         elif args.lr_scheduler == "linear_lr":
             scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, total_iters=args.warmup_epoch)
@@ -222,14 +252,19 @@ def main():
     # for name, parms in model.named_parameters():
     #     print('-->name:', name)
 
-    coke_trainer = Trainer(model, train_config)
+    if 'alias' in args.task_name:
+        coke_trainer = Trainer_alias(model, train_config)
+    else:
+        coke_trainer = Trainer(model, train_config)
 
     coke_trainer.load_train_data_loader(train_loader)
     coke_trainer.load_val_data_loader(val_loader)
 
     coke_trainer.set_loss_function(loss_function)
     coke_trainer.set_optimizer(optimizer)
+    coke_trainer.set_pretrained_optimizer(pretrained_optimizer)
     coke_trainer.set_lr_scheduler(scheduler)
+    coke_trainer.set_pretrained_lr_scheduler(pretrained_scheduler)
 
     total_acc, total_loss = coke_trainer.train()
 

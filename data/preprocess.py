@@ -41,7 +41,7 @@ def mask_tokens(vocab_size, tokenizer, inputs, mlm_prob):
     mask_indices通过bool()函数转成True,False
     下面对于85%原始数据 没有被mask的位置进行赋值为-1
     """
-    labels[~masked_indices] = -1  # We only compute loss on masked tokens
+    labels[~masked_indices] = 0  # We only compute loss on masked tokens
 
     # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
     """
@@ -67,23 +67,35 @@ class MLMFeatures(object):
     """A single set of features of data."""
 
     def __init__(self, src_ids, segment_ids, position_ids, input_mask, mlm_label_ids,
-                 mem_label_ids):
+                 mem_label_ids, mem_label_idx):
         self.src_ids = src_ids
         self.segment_ids = segment_ids
         self.position_ids = position_ids
         self.input_mask = input_mask
         self.mlm_label_ids = mlm_label_ids
         self.mem_label_ids = mem_label_ids
+        self.mem_label_idx = mem_label_idx
+
+
+class MEMFeatures(object):
+    """A single set of features of data."""
+
+    def __init__(self, src_ids, segment_ids, position_ids, input_mask, mem_label_ids):
+        self.src_ids = src_ids
+        self.segment_ids = segment_ids
+        self.position_ids = position_ids
+        self.input_mask = input_mask
+        self.mem_label_ids = mem_label_ids
 
 
 class DataProcessor(object):
     """Base class for data converters for sequence classification data sets."""
 
-    def get_train_examples(self, mask_id, data_dir):
+    def get_train_examples(self, data_dir):
         """Gets a collection of `InputExample`s for the train set."""
         raise NotImplementedError()
 
-    def get_dev_examples(self, mask_id, data_dir):
+    def get_dev_examples(self, data_dir):
         """Gets a collection of `InputExample`s for the dev set."""
         raise NotImplementedError()
 
@@ -108,10 +120,12 @@ class DataProcessor(object):
 class KGProcessor(DataProcessor):
     """Processor for knowledge graph data set."""
 
-    def __init__(self, tokenizer, max_mlm_seq_len):
+    def __init__(self, tokenizer, max_entity_len=16, max_rel_len=8, max_mlm_seq_len=512):
         self.labels = set()
         self.tokenizer = tokenizer
         self.max_len = max_mlm_seq_len
+        self.max_entity_len = max_entity_len
+        self.max_rel_len = max_rel_len
         self.cls_id = [self.tokenizer.convert_tokens_to_ids("[CLS]")]
         self.sep_id = [self.tokenizer.convert_tokens_to_ids("[SEP]")]
         self.ent_begin_id = [self.tokenizer.convert_tokens_to_ids("[EB]")]
@@ -122,20 +136,30 @@ class KGProcessor(DataProcessor):
         self.mask_id = [self.tokenizer.convert_tokens_to_ids("[EMASK]")]
         self.mask_id = [self.tokenizer.convert_tokens_to_ids("[MASK]")]
 
-    def get_train_examples(self, emask_id, data_dir):
+    def get_train_examples(self, data_dir):
         """See base class."""
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev_path_demo.tsv")), "train", emask_id, data_dir)
+            self._read_tsv(os.path.join(data_dir, "train_with_path.tsv")), "train", "text", data_dir)
 
-    def get_dev_examples(self, emask_id, data_dir):
+    def get_dev_examples(self, data_dir):
         """See base class."""
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev_path.tsv")), "dev", emask_id, data_dir)
+            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev", "text", data_dir)
 
-    def get_test_examples(self, emask_id, data_dir):
+    def get_alias_train_examples(self, data_dir):
         """See base class."""
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "test_path.tsv")), "test", emask_id, data_dir)
+            self._read_tsv(os.path.join(data_dir, "train_with_path.tsv")), "train", "alias", data_dir)
+
+    def get_alias_dev_examples(self, data_dir):
+        """See base class."""
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev", "alias", data_dir)
+
+    def get_test_examples(self, data_dir):
+        """See base class."""
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, "test.tsv")), "test", "text", data_dir)
 
     def get_relations(self, data_dir):
         """Gets all labels (relations) in the knowledge graph."""
@@ -173,9 +197,9 @@ class KGProcessor(DataProcessor):
         """Gets test triples."""
         return self._read_tsv(os.path.join(data_dir, "test.tsv"))
 
-    def _create_examples(self, lines, set_type, emask_id, data_dir):
+    def _create_examples(self, lines, set_type, data_type, data_dir):
         """Creates examples for the training and dev sets."""
-        features_file = os.path.join(data_dir, set_type + "_features.npy")
+        features_file = os.path.join(data_dir, set_type + "_" + data_type + "_features.npy")
         features_path = Path(features_file)
         if features_path.exists():
             features = np.load(features_file, allow_pickle=True)
@@ -206,22 +230,166 @@ class KGProcessor(DataProcessor):
             for line in rel_lines:
                 temp = line.strip().split('\t')
                 rel2text[temp[0]] = temp[1]
-
+        relations = list(rel2text.keys())
         # lines_str_set = set(['\t'.join(line) for line in lines])
+
         examples, mlm_features = [], []
-        for (index, line) in tqdm(enumerate(lines)):
-            if index % 10000 == 0:
-                logger.info("Writing example %d of %d" % (index, len(lines)))
-            relation_1_text = rel2text[line[1]]
-            relation_2_text = rel2text[line[3]]
-            text_type_list = ["head", "mid", "tail"]
-            if set_type == "dev" or set_type == "test":
-                label = "1"
-                self.labels.add(label)
-            elif set_type == "train":
-                for text_type in text_type_list:
-                    rel_1_tokens = self.tokenizer.tokenize(relation_1_text)
-                    rel_2_tokens = self.tokenizer.tokenize(relation_2_text)
+
+        if data_type == 'alias':
+            ent2text = ent2alias
+
+        if set_type == 'test' or set_type == 'dev':
+            text_type_list = ['head']
+        else:
+            text_type_list = ['tail', 'head', 'mid']
+        for text_type in text_type_list:
+            for (index, line) in tqdm(enumerate(lines)):
+                if index % 10000 == 0:
+                    logger.info("Writing example %d of %d" % (index, len(lines)))
+                item_nums = len(line)
+                if item_nums == 3:
+                    max_text_len = self.max_len - 7 - self.max_entity_len * 2 - self.max_rel_len
+                    head, rel, tail = line
+                    relation_text = rel2text[rel]
+                    head_alias = ent2alias[head]
+                    tail_alias = ent2alias[tail]
+                    if text_type == 'tail':
+                        try:
+                            tail_text = ent2text[tail]
+                        except:
+                            print("Cannot find description for entity {}!".format(tail))
+                            continue
+                        rel_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(relation_text))
+                        ha_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head_alias))
+                        ta_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail_alias))
+                        tt_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail_text))
+                        tt_tokens, mlm_label_ids = mask_tokens(vocab_size=len(self.tokenizer.get_vocab()),
+                                                               tokenizer=self.tokenizer,
+                                                               inputs=tt_tokens,
+                                                               mlm_prob=0.15)
+                        # ha_tokens = self.mask_id * len(ha_tokens)
+                        # all_tokens = self.cls_id + self.ent_begin_id + ha_tokens + self.ent_end_id + \
+                        #              self.rel_begin_id + rel_tokens + self.rel_end_id + \
+                        #              self.ent_begin_id + ta_tokens + tt_tokens + self.ent_end_id
+                        # _truncate_ids(all_tokens, len(all_tokens), self.max_len)
+                        # mem_label_ids = [0] * 2 + ha_tokens
+                        # _truncate_ids(mem_label_ids, len(mem_label_ids), self.max_len)
+                        # mem_label_idx = [2, len(ha_tokens) + 2]
+                        # mlm_label_ids = [0] * (len(self.cls_id + self.ent_begin_id + ha_tokens + self.ent_end_id +
+                        #                            self.rel_begin_id + rel_tokens + self.rel_end_id +
+                        #                            self.ent_begin_id + ta_tokens)) + mlm_label_ids
+                        # _truncate_ids(mlm_label_ids, len(mlm_label_ids), self.max_len)
+
+                        _truncate_pad_sequence((ha_tokens, ta_tokens, rel_tokens, tt_tokens), text_type,
+                                               self.max_entity_len, self.max_rel_len, max_text_len, self.max_len - 7)
+                        mem_label_ids = [0] * 2 + ha_tokens + [0] * (self.max_len - self.max_entity_len - 2)
+                        ha_tokens = self.mask_id * len(ha_tokens)
+                        mem_label_idx = [2, self.max_entity_len + 2]
+                        _truncate_ids(mlm_label_ids, len(mlm_label_ids), max_text_len)
+                        mlm_label_ids = [0] * (self.max_len - max_text_len - 1) + mlm_label_ids + [0]
+                        all_tokens = self.cls_id + self.ent_begin_id + ha_tokens + self.ent_end_id + \
+                                     self.rel_begin_id + rel_tokens + self.rel_end_id + \
+                                     self.ent_begin_id + ta_tokens + tt_tokens + self.ent_end_id
+                        head_len, tail_len = len(ha_tokens), len(ta_tokens + tt_tokens)
+                    elif text_type == 'head':
+                        try:
+                            head_text = ent2text[head]
+                        except:
+                            print("Cannot find description for entity {}!".format(head))
+                            continue
+                        rel_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(relation_text))
+                        ha_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head_alias))
+                        ta_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail_alias))
+                        ht_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head_text))
+                        ht_tokens, mlm_label_ids = mask_tokens(vocab_size=len(self.tokenizer.get_vocab()),
+                                                               tokenizer=self.tokenizer,
+                                                               inputs=ht_tokens,
+                                                               mlm_prob=0.15)
+                        # ta_tokens = self.mask_id * len(ta_tokens)
+                        # all_tokens = self.cls_id + self.ent_begin_id + ha_tokens + ht_tokens + self.ent_end_id + \
+                        #              self.rel_begin_id + rel_tokens + self.rel_end_id + \
+                        #              self.ent_begin_id + ta_tokens + self.ent_end_id
+                        # _truncate_ids(all_tokens, len(all_tokens), self.max_len)
+                        # temp_len = len(
+                        #     self.cls_id + self.ent_begin_id + ha_tokens + ht_tokens + self.ent_end_id + \
+                        #     self.rel_begin_id + rel_tokens + self.rel_end_id + \
+                        #     self.ent_begin_id)
+                        # mem_label_ids = [0] * temp_len + ta_tokens
+                        # mem_label_idx = [temp_len, len(ta_tokens) + temp_len]
+                        # _truncate_ids(mem_label_ids, len(mem_label_ids), self.max_len)
+                        # mlm_label_ids = [0] * len(self.cls_id + self.ent_begin_id + ha_tokens) + mlm_label_ids
+                        # _truncate_ids(mlm_label_ids, len(mlm_label_ids), self.max_len)
+
+                        _truncate_pad_sequence((ha_tokens, ta_tokens, rel_tokens, ht_tokens), text_type,
+                                               self.max_entity_len, self.max_rel_len, max_text_len, self.max_len - 7)
+                        mem_label_ids = [0] * (self.max_len - self.max_entity_len - 1) + ta_tokens + [0]
+                        mem_label_idx = [self.max_len - 2 - self.max_entity_len, self.max_len - 2]
+                        ta_tokens = self.mask_id * len(ta_tokens)
+                        _truncate_ids(mlm_label_ids, len(mlm_label_ids), max_text_len)
+                        mlm_label_ids = [0] * (2 + self.max_entity_len) + mlm_label_ids + [0] * (5 + self.max_rel_len + self.max_entity_len)
+                        all_tokens = self.cls_id + self.ent_begin_id + ha_tokens + ht_tokens + self.ent_end_id + \
+                                     self.rel_begin_id + rel_tokens + self.rel_end_id + \
+                                     self.ent_begin_id + ta_tokens + self.ent_end_id
+                        head_len, tail_len = len(ha_tokens + ht_tokens), len(ta_tokens)
+                    else:
+                        continue
+                    all_len, rel_len = len(all_tokens), len(rel_tokens)
+
+                    # segment id
+                    segment_ids = [0] * (head_len + 3) + [1] * (rel_len + 2) + [0] * (tail_len + 2)
+                    _truncate_ids(segment_ids, len(segment_ids), self.max_len)
+
+                    # position id
+                    position_ids = []
+                    for i in range(all_len):
+                        position_ids += [i]
+
+                    # input mask
+                    input_mask = []
+                    for i in range(all_len):
+                        input_mask += [1 if all_tokens[i] != 0 else 0]
+
+                    all_tokens = np.array(all_tokens)
+                    segment_ids = np.array(segment_ids)
+                    position_ids = np.array(position_ids)
+                    input_mask = np.array(input_mask)
+                    mlm_label_ids = np.array(mlm_label_ids)
+                    mem_label_ids = np.array(mem_label_ids)
+
+                    assert len(all_tokens) == self.max_len
+                    assert len(segment_ids) == self.max_len
+                    assert len(position_ids) == self.max_len
+                    assert len(input_mask) == self.max_len
+                    assert len(mlm_label_ids) == self.max_len
+                    assert len(mem_label_ids) == self.max_len
+
+                    if index == 0:
+                        print("############ Triple input data#############")
+                        print("input tokens:{}".format(self.tokenizer.convert_ids_to_tokens(all_tokens)))
+                        print("input ids:{}".format(all_tokens))
+                        print("input masks:{}".format(input_mask))
+                        print("segment ids:{}".format(segment_ids))
+                        print("position ids:{}".format(position_ids))
+                        print("mlm label:{}".format(mlm_label_ids))
+                        print("mem label:{}".format(mem_label_ids))
+                        print("mem label idx:{}".format(mem_label_idx))
+
+                    mlm_feature = MLMFeatures(
+                        src_ids=all_tokens,
+                        segment_ids=segment_ids,
+                        position_ids=position_ids,
+                        input_mask=input_mask,
+                        mlm_label_ids=mlm_label_ids,
+                        mem_label_ids=mem_label_ids,
+                        mem_label_idx=mem_label_idx)
+                    mlm_features.append(mlm_feature)
+
+                elif item_nums == 5:
+                    max_text_len = self.max_len - 11 - self.max_entity_len * 2 - self.max_rel_len * 2
+                    relation_1_text = rel2text[line[1]]
+                    relation_2_text = rel2text[line[3]]
+                    rel_1_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(relation_1_text))
+                    rel_2_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(relation_2_text))
                     if text_type == 'head':
                         try:
                             head = ent2text[line[0]]
@@ -229,28 +397,28 @@ class KGProcessor(DataProcessor):
                             print("Cannot find description for entity {}!".format(ent2alias[line[0]]))
                             continue
                         mid, tail = ent2alias[line[2]], ent2alias[line[4]]
-                        head_tokens = self.tokenizer.tokenize(head)
-                        mid_tokens = self.tokenizer.tokenize(mid)
-                        tail_tokens = self.tokenizer.tokenize(tail)
-                        _truncate_pad_sequence(head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens,
-                                                                 tail_tokens, text_type, self.max_len - 11)
-                        head_tokens = self.tokenizer.convert_tokens_to_ids(head_tokens)
+                        head_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head))
+                        mid_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(mid))
+                        tail_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail))
                         head_tokens, mlm_label_ids = mask_tokens(vocab_size=len(self.tokenizer.get_vocab()),
                                                                  tokenizer=self.tokenizer,
                                                                  inputs=head_tokens,
                                                                  mlm_prob=0.15)
-                        mlm_label_ids = [-1] * 2 + mlm_label_ids + [-1] * (self.max_len - len(mlm_label_ids) - 2)
-                        head_tokens = self.cls_id + self.ent_begin_id + head_tokens + self.ent_end_id
-                        mem_label_ids = self.tokenizer.convert_tokens_to_ids(tail_tokens)
 
+                        _truncate_ids(mlm_label_ids, len(mlm_label_ids), max_text_len)
+                        mlm_label_ids = [0] * 2 + mlm_label_ids + [0] * (self.max_len - 2 - max_text_len)
+                        _truncate_pad_sequence((head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens, tail_tokens),
+                                               text_type, self.max_entity_len, self.max_rel_len, max_text_len,
+                                               self.max_len - 11)
+                        head_tokens = self.cls_id + self.ent_begin_id + head_tokens + self.ent_end_id
+                        mem_label_ids = [0] * (self.max_len - self.max_entity_len - 1) + tail_tokens + [0]
+                        mem_label_idx = [self.max_len - 2 - self.max_entity_len, self.max_len - 2]
                         tail_tokens = self.ent_begin_id + self.mask_id * len(tail_tokens) + self.ent_end_id
 
-                        rel_1_tokens = ["[RB]"] + rel_1_tokens + ["[RE]"]
-                        mid_tokens = ["[EB]"] + mid_tokens + ["[EE]"]
-                        rel_2_tokens = ["[RB]"] + rel_2_tokens + ["[RE]"]
-
+                        rel_1_tokens = self.rel_begin_id + rel_1_tokens + self.rel_end_id
+                        mid_tokens = self.ent_begin_id + mid_tokens + self.ent_end_id
+                        rel_2_tokens = self.rel_begin_id + rel_2_tokens + self.rel_end_id
                         all_tokens = rel_1_tokens + mid_tokens + rel_2_tokens
-                        all_tokens = self.tokenizer.convert_tokens_to_ids(all_tokens)
                         all_tokens = head_tokens + all_tokens + tail_tokens
                         # input_mask = (text_input_mask + [1] * (len(all_tokens) - len(head_tokens)))
 
@@ -261,39 +429,43 @@ class KGProcessor(DataProcessor):
                             print("Cannot find description for entity {}!".format(ent2alias[line[2]]))
                             continue
                         head, tail = ent2alias[line[0]], ent2alias[line[4]]
-                        head_tokens = self.tokenizer.tokenize(head)
-                        mid_tokens = self.tokenizer.tokenize(mid)
-                        tail_tokens = self.tokenizer.tokenize(tail)
-                        _truncate_pad_sequence(head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens,
-                                                                 tail_tokens, text_type, self.max_len - 11)
-                        mid_tokens = self.tokenizer.convert_tokens_to_ids(mid_tokens)
+                        head_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head))
+                        mid_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(mid))
+                        tail_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail))
                         mid_tokens, mlm_label_ids = mask_tokens(vocab_size=len(self.tokenizer.get_vocab()),
                                                                 tokenizer=self.tokenizer,
                                                                 inputs=mid_tokens,
                                                                 mlm_prob=0.15)
-                        mlm_label_ids = [-1] * 30 + mlm_label_ids + [-1] * 29
+                        _truncate_pad_sequence((head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens, tail_tokens),
+                                               text_type, self.max_entity_len, self.max_rel_len, max_text_len,
+                                               self.max_len - 11)
+                        _truncate_ids(mlm_label_ids, len(mlm_label_ids), max_text_len)
+                        mlm_label_ids = [0] * (self.max_entity_len + 6 + self.max_rel_len) + mlm_label_ids + [0] * (
+                                    self.max_entity_len + self.max_rel_len + 5)
                         mid_tokens = self.ent_begin_id + mid_tokens + self.ent_end_id
                         rnd = random.random()
                         if rnd <= 0.5:
                             mask_type = 'tail'
-                            mem_label_ids = self.tokenizer.convert_tokens_to_ids(tail_tokens)
-                            tail_tokens = self.ent_begin_id + self.mask_id * len(tail_tokens) + self.ent_end_id
-                            head_tokens = ["[CLS]"] + ["[EB]"] + head_tokens + ["[EE]"]
+                            mem_label_ids = [0] * (self.max_len - self.max_entity_len - 1) + tail_tokens + [0]
+                            mem_label_idx = [self.max_len - 2 - self.max_entity_len, self.max_len - 2]
 
-                            rel_1_tokens = ["[RB]"] + rel_1_tokens + ["[RE]"]
-                            rel_2_tokens = ["[RB]"] + rel_2_tokens + ["[RE]"]
+                            tail_tokens = self.ent_begin_id + self.mask_id * len(tail_tokens) + self.ent_end_id
+                            head_tokens = self.cls_id + self.ent_begin_id + head_tokens + self.ent_end_id
+
+                            rel_1_tokens = self.rel_begin_id + rel_1_tokens + self.rel_end_id
+                            rel_2_tokens = self.rel_begin_id + rel_2_tokens + self.rel_end_id
                             all_tokens = self.tokenizer.convert_tokens_to_ids(head_tokens + rel_1_tokens) + mid_tokens \
                                          + self.tokenizer.convert_tokens_to_ids(rel_2_tokens) + tail_tokens
                         else:
                             mask_type = 'head'
-                            mem_label_ids = self.tokenizer.convert_tokens_to_ids(head_tokens)
+                            mem_label_ids = [0] * 2 + head_tokens + [0] * (self.max_len - 2 - self.max_entity_len)
+                            mem_label_idx = [2, self.max_entity_len + 2]
                             head_tokens = self.cls_id + self.ent_begin_id + \
                                           self.mask_id * len(head_tokens) + self.ent_end_id
-                            tail_tokens = ["[EB]"] + tail_tokens + ["[EE]"]
-                            rel_1_tokens = ["[RB]"] + rel_1_tokens + ["[RE]"]
-                            rel_2_tokens = ["[RB]"] + rel_2_tokens + ["[RE]"]
-                            all_tokens = head_tokens + self.tokenizer.convert_tokens_to_ids(rel_1_tokens) + mid_tokens \
-                                         + self.tokenizer.convert_tokens_to_ids(rel_2_tokens + tail_tokens)
+                            tail_tokens = self.ent_begin_id + tail_tokens + self.ent_end_id
+                            rel_1_tokens = self.rel_begin_id + rel_1_tokens + self.rel_end_id
+                            rel_2_tokens = self.rel_begin_id + rel_2_tokens + self.rel_end_id
+                            all_tokens = head_tokens + rel_1_tokens + mid_tokens + rel_2_tokens + tail_tokens
                         # input_mask = ([1] * (head_len + rel_1_len) + text_input_mask + [1] * (rel_2_len + tail_len))
                     else:
                         try:
@@ -302,29 +474,30 @@ class KGProcessor(DataProcessor):
                             print("Cannot find description for entity {}!".format(ent2alias[line[4]]))
                             continue
                         head, mid = ent2alias[line[0]], ent2alias[line[2]]
-                        head_tokens = self.tokenizer.tokenize(head)
-                        mid_tokens = self.tokenizer.tokenize(mid)
-                        tail_tokens = self.tokenizer.tokenize(tail)
-                        _truncate_pad_sequence(head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens,
-                                                                 tail_tokens, text_type, self.max_len - 11)
-                        tail_tokens = self.tokenizer.convert_tokens_to_ids(tail_tokens)
+                        head_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head))
+                        mid_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(mid))
+                        tail_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail))
                         tail_tokens, mlm_label_ids = mask_tokens(vocab_size=len(self.tokenizer.get_vocab()),
                                                                  tokenizer=self.tokenizer,
                                                                  inputs=tail_tokens,
                                                                  mlm_prob=0.15)
-                        mlm_label_ids = [-1] * (self.max_len - len(mlm_label_ids) - 1) + mlm_label_ids + [-1] * 1
+                        _truncate_pad_sequence((head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens, tail_tokens),
+                                               text_type, self.max_entity_len, self.max_rel_len, max_text_len,
+                                               self.max_len - 11)
+                        _truncate_ids(mlm_label_ids, len(mlm_label_ids), max_text_len)
+                        mlm_label_ids = [0] * (self.max_len - max_text_len - 1) + mlm_label_ids + [0]
                         tail_tokens = self.ent_begin_id + tail_tokens + self.ent_end_id
 
-                        mem_label_ids = self.tokenizer.convert_tokens_to_ids(head_tokens)
+                        mem_label_ids = [0] * 2 + head_tokens + [0] * (self.max_len - 2 - self.max_entity_len)
+                        mem_label_idx = [2, self.max_entity_len + 2]
 
                         head_tokens = self.cls_id + self.ent_begin_id + \
                                       self.mask_id * len(head_tokens) + self.ent_end_id
 
-                        rel_1_tokens = ["[RB]"] + rel_1_tokens + ["[RE]"]
-                        mid_tokens = ["[EB]"] + mid_tokens + ["[EE]"]
-                        rel_2_tokens = ["[RB]"] + rel_2_tokens + ["[RE]"]
+                        rel_1_tokens = self.rel_begin_id + rel_1_tokens + self.rel_end_id
+                        mid_tokens = self.ent_begin_id + mid_tokens + self.ent_end_id
+                        rel_2_tokens = self.rel_begin_id + rel_2_tokens + self.rel_end_id
                         all_tokens = rel_1_tokens + mid_tokens + rel_2_tokens
-                        all_tokens = self.tokenizer.convert_tokens_to_ids(all_tokens)
                         all_tokens = head_tokens + all_tokens + tail_tokens
                         # input_mask = ([1] * (len(all_tokens) - len(tail_tokens)) + text_input_mask)
 
@@ -351,140 +524,109 @@ class KGProcessor(DataProcessor):
                     input_mask = np.array(input_mask)
                     mlm_label_ids = np.array(mlm_label_ids)
                     mem_label_ids = np.array(mem_label_ids)
-                    # mem_mask_pos = np.argwhere(all_tokens == self.mask_id)
-                    # mem_label_ids = mem_label_ids.reshape(-1, 1)[mem_mask_pos]
-                    # all_tokens[mem_mask_pos] = self.mask_id
-                    # print(len(mem_mask_pos))
-                    # if index % 10000 == 0:
-                    #     print("head")
-                    #     print(head)
-                    #     print("mid")
-                    #     print(mid)
-                    #     print("tail")
-                    #     print(tail)
-                    #     print("all_tokens")
-                    #     print(all_tokens)
-                    #     print("segment_ids")
-                    #     print(segment_ids)
-                    #     print("position_ids")
-                    #     print(position_ids)
-                    #     print("input_mask")
-                    #     print(input_mask)
-                    #     print("mlm_label_ids")
-                    #     print(mlm_label_ids)
-                    #     print("mem_label_ids")
-                    # print(mem_label_ids.shape)
-                    #     print("mem_mask_pos")
-                    #     print(mem_mask_pos)
-
                     assert len(all_tokens) == self.max_len
                     assert len(segment_ids) == self.max_len
                     assert len(position_ids) == self.max_len
                     assert len(input_mask) == self.max_len
                     assert len(mlm_label_ids) == self.max_len
-                    assert len(mem_label_ids) == 16
+                    assert len(mem_label_ids) == self.max_len
+                    assert len(mem_label_idx) == 2
                     # assert len(mem_mask_pos) == len(mem_label_ids)
-
+                    if len(mlm_features) == 0:
+                        print("############ Path input data#############")
+                        print("input tokens:{}".format(self.tokenizer.convert_ids_to_tokens(all_tokens)))
+                        print("input ids:{}".format(all_tokens))
+                        print("input masks:{}".format(input_mask))
+                        print("segment ids:{}".format(segment_ids))
+                        print("position ids:{}".format(position_ids))
+                        print("mlm label:{}".format(mlm_label_ids))
+                        print("mem label:{}".format(mem_label_ids))
+                        print("mem label idx:{}".format(mem_label_idx))
                     mlm_feature = MLMFeatures(
                         src_ids=all_tokens,
                         segment_ids=segment_ids,
                         position_ids=position_ids,
                         input_mask=input_mask,
                         mlm_label_ids=mlm_label_ids,
-                        mem_label_ids=mem_label_ids)
+                        mem_label_ids=mem_label_ids,
+                        mem_label_idx=mem_label_idx)
                     mlm_features.append(mlm_feature)
         np.save(features_file, np.array(mlm_features))
         return mlm_features
 
 
-def _truncate_pad_sequence(head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens, tail_tokens, text_type, max_len):
-    head_len, rel_1_len, mid_len, rel_2_len, tail_len = \
-        len(head_tokens), len(rel_1_tokens), len(mid_tokens), len(rel_2_tokens), len(tail_tokens)
-    if rel_1_len <= 8:
-        rel_1_tokens.extend((8 - rel_1_len) * ["[PAD]"])
+def _truncate_ids(input_ids, ids_len, max_ids_len):
+    if ids_len <= max_ids_len:
+        input_ids.extend((max_ids_len - ids_len) * [0])
     else:
         while True:
-            rel_1_tokens.pop()
-            if len(rel_1_tokens) <= 8:
+            input_ids.pop()
+            if len(input_ids) <= max_ids_len:
                 break
-    if rel_2_len <= 8:
-        rel_2_tokens.extend((8 - rel_2_len) * ["[PAD]"])
+
+
+def _truncate_entity(input_tokens, entity_len, max_entity_len):
+    if entity_len <= max_entity_len:
+        input_tokens.extend((max_entity_len - entity_len) * [0])
     else:
         while True:
-            rel_2_tokens.pop()
-            if len(rel_2_tokens) <= 8:
+            input_tokens.pop()
+            if len(input_tokens) <= max_entity_len:
                 break
 
-    if text_type == 'head':
-        if mid_len <= 16:
-            mid_tokens.extend((16 - mid_len) * ["[PAD]"])
-        else:
-            while True:
-                mid_tokens.pop()
-                if len(mid_tokens) <= 16:
-                    break
-        if tail_len <= 16:
-            tail_tokens.extend((16 - tail_len) * ["[PAD]"])
-        else:
-            while True:
-                tail_tokens.pop()
-                if len(tail_tokens) <= 16:
-                    break
-        if head_len > max_len - 48:
-            while True:
-                head_tokens.pop()
-                head_len -= 1
-                if head_len <= max_len - 48:
-                    break
-        else:
-            head_tokens.extend((max_len - 48 - head_len) * ["[PAD]"])
 
-    if text_type == 'mid':
-        if head_len <= 16:
-            head_tokens.extend((16 - head_len) * ["[PAD]"])
-        else:
-            while True:
-                head_tokens.pop()
-                if len(head_tokens) <= 16:
-                    break
-        if tail_len <= 16:
-            tail_tokens.extend((16 - tail_len) * ["[PAD]"])
-        else:
-            while True:
-                tail_tokens.pop()
-                if len(tail_tokens) <= 16:
-                    break
-        if mid_len > max_len - 48:
-            while True:
-                mid_tokens.pop()
-                mid_len -= 1
-                if mid_len <= max_len - 48:
-                    break
-        else:
-            mid_tokens.extend((max_len - 48 - mid_len) * ["[PAD]"])
-        assert len(head_tokens) == 16
-        assert len(head_tokens) == 16
+def _truncate_relation(input_tokens, rel_len, max_rel_len):
+    if rel_len <= max_rel_len:
+        input_tokens.extend((max_rel_len - rel_len) * [0])
+    else:
+        while True:
+            input_tokens.pop()
+            if len(input_tokens) <= max_rel_len:
+                break
 
-    if text_type == 'tail':
-        if mid_len <= 16:
-            mid_tokens.extend((16 - mid_len) * ["[PAD]"])
-        else:
-            while True:
-                mid_tokens.pop()
-                if len(mid_tokens) <= 16:
-                    break
-        if head_len <= 16:
-            head_tokens.extend((16 - head_len) * ["[PAD]"])
-        else:
-            while True:
-                head_tokens.pop()
-                if len(head_tokens) <= 16:
-                    break
-        if tail_len > max_len - 48:
-            while True:
-                tail_tokens.pop()
-                tail_len -= 1
-                if tail_len <= max_len - 48:
-                    break
-        else:
-            tail_tokens.extend((max_len - 48 - tail_len) * ["[PAD]"])
+
+def _truncate_text(input_tokens, text_len, max_text_len):
+    if text_len <= max_text_len:
+        input_tokens.extend((max_text_len - text_len) * [0])
+    else:
+        while True:
+            input_tokens.pop()
+            if len(input_tokens) <= max_text_len:
+                break
+
+
+def _truncate_pad_sequence(input_tokens, text_type, max_entity_len, max_rel_len, max_text_len, max_len):
+    if len(input_tokens) == 4:
+        head_tokens, tail_tokens, rel_tokens, text_tokens = input_tokens
+        head_len, rel_len, tail_len, text_len = len(head_tokens), len(rel_tokens), len(tail_tokens), len(text_tokens)
+
+        _truncate_relation(rel_tokens, rel_len, max_rel_len)
+        _truncate_entity(head_tokens, head_len, max_entity_len)
+        _truncate_entity(tail_tokens, tail_len, max_entity_len)
+        if text_type == 'head':
+            _truncate_text(text_tokens, text_len, max_text_len)
+        elif text_type == 'tail':
+            _truncate_text(text_tokens, text_len, max_text_len)
+
+    elif len(input_tokens) == 5:
+        head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens, tail_tokens = input_tokens
+        head_len, rel_1_len, mid_len, rel_2_len, tail_len = \
+            len(head_tokens), len(rel_1_tokens), len(mid_tokens), len(rel_2_tokens), len(tail_tokens)
+
+        _truncate_relation(rel_1_tokens, rel_1_len, max_rel_len)
+        _truncate_relation(rel_2_tokens, rel_2_len, max_rel_len)
+
+        if text_type == 'head':
+            _truncate_entity(mid_tokens, mid_len, max_entity_len)
+            _truncate_entity(tail_tokens, tail_len, max_entity_len)
+            _truncate_text(head_tokens, head_len, max_text_len)
+
+        elif text_type == 'mid':
+            _truncate_entity(head_tokens, head_len, max_entity_len)
+            _truncate_entity(tail_tokens, tail_len, max_entity_len)
+            _truncate_text(mid_tokens, mid_len, max_text_len)
+
+        elif text_type == 'tail':
+            _truncate_entity(mid_tokens, mid_len, max_entity_len)
+            _truncate_entity(head_tokens, head_len, max_entity_len)
+            _truncate_text(tail_tokens, tail_len, max_text_len)

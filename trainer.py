@@ -116,10 +116,11 @@ class Trainer():
 
         self.pad_id = train_config["pad_id"]
         self.mask_id = int(train_config["mask_id"])
-        self.e_mask_id = int(train_config["e_mask_id"])
         self.loss_function = None
+        self.pretrained_optimizer = None
         self.optimizer = None
         self.lr_scheduler = None
+        self.pretrained_lr_scheduler = None
         self.train_data_loader = None
         self.val_data_loader = None
         self.test_data_loader = None
@@ -129,11 +130,17 @@ class Trainer():
         self.last_loss = 10000.0
         self.save = False
 
+    def set_pretrained_optimizer(self, optimizer):
+        self.pretrained_optimizer = optimizer
+
     def set_optimizer(self, optimizer):
         self.optimizer = optimizer
 
     def set_lr_scheduler(self, lr_scheduler):
         self.lr_scheduler = lr_scheduler
+
+    def set_pretrained_lr_scheduler(self, lr_scheduler):
+        self.pretrained_lr_scheduler = lr_scheduler
 
     def set_loss_function(self, loss_function):
         self.loss_function = loss_function
@@ -159,14 +166,15 @@ class Trainer():
             # fetch batch data
             try:
                 src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, \
-                mem_label_ids = batch_data
+                mem_label_ids, mem_label_idx = batch_data
             except RuntimeError:
                 print("One data instance's length should be 5, received {}.".format(len(batch_data)))
                 continue
             if self.use_cuda:
-                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids = \
+                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, mem_label_idx = \
                     src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
-                    pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device)
+                    pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device), \
+                    mem_label_idx.to(self.device)
 
             with torch.no_grad():
                 mlm_mask_pos = torch.argwhere(mlm_label_ids.reshape(-1) > 0)
@@ -178,17 +186,15 @@ class Trainer():
                 'src_ids': src_ids,
                 'input_mask': input_mask,
                 'segment_ids': seg_ids,
-                'position_ids': pos_ids,
-                'mlm_mask_pos': mlm_mask_pos,
-                'mem_mask_pos': mem_mask_pos
+                'position_ids': pos_ids
             }
             torch.cuda.synchronize()
             self.optimizer.zero_grad()
 
             # forward
-            out = self.model(input_x)
-            mlm_last_hidden_state = out["mlm_last_hidden_state"]
-            mem_last_hidden_state = out["mem_last_hidden_state"]
+            logits = self.model(input_x)["logits"]
+            mlm_last_hidden_state = logits.view(-1, self.vocab_size)[mlm_mask_pos.view(-1)]
+            mem_last_hidden_state = logits.view(-1, self.vocab_size)[mem_mask_pos.view(-1)]
             # calc mlm_loss
             mlm_loss = self.loss_function(
                 input=mlm_last_hidden_state,
@@ -271,15 +277,15 @@ class Trainer():
                 # fetch batch data
                 try:
                     src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, \
-                    mem_label_ids = batch_data
+                    mem_label_ids, mem_label_idx = batch_data
                 except RuntimeError:
                     print("One data instance's length should be 5, received {}.".format(len(batch_data)))
                     continue
                 if self.use_cuda:
-                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids = \
+                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, mem_label_idx = \
                         src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
-                        pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device)
-
+                        pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device), \
+                        mem_label_idx.to(self.device)
                 with torch.no_grad():
                     mlm_mask_pos = torch.argwhere(mlm_label_ids.reshape(-1) > 0)
                     mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos].squeeze()
@@ -289,17 +295,14 @@ class Trainer():
                     'src_ids': src_ids,
                     'input_mask': input_mask,
                     'segment_ids': seg_ids,
-                    'position_ids': pos_ids,
-                    'mlm_mask_pos': mlm_mask_pos,
-                    'mem_mask_pos': mem_mask_pos
+                    'position_ids': pos_ids
                 }
                 torch.cuda.synchronize()
-                self.optimizer.zero_grad()
 
                 # forward
-                out = self.model(input_x)
-                mlm_last_hidden_state = out["mlm_last_hidden_state"]
-                mem_last_hidden_state = out["mem_last_hidden_state"]
+                logits = self.model(input_x)["logits"]
+                mlm_last_hidden_state = logits.view(-1, self.vocab_size)[mlm_mask_pos.view(-1)]
+                mem_last_hidden_state = logits.view(-1, self.vocab_size)[mem_mask_pos.view(-1)]
                 # calc mlm_loss
                 mlm_loss = self.loss_function(
                     input=mlm_last_hidden_state.half(),
@@ -327,7 +330,7 @@ class Trainer():
                     loss = mlm_loss + mem_loss
                     loss = self.optimizer.loss_scale(loss)
                     loss.mean().backward()
-                    bmt.optim_step(self.optimizer)
+                    # bmt.optim_step(self.optimizer)
                     lr = self.lr_scheduler.get_lr()
                     torch.cuda.synchronize()
                 else:
@@ -335,7 +338,7 @@ class Trainer():
                     mem_loss_sum += mem_loss.data
                     loss = mlm_loss + mem_loss
                     loss.mean().backward()
-                    self.optimizer.step()
+                    # self.optimizer.step()
                     lr = self.lr_scheduler.get_last_lr()[0]
                 if self.use_ema:
                     self.ema_model.update()
@@ -349,7 +352,18 @@ class Trainer():
                 mem_total_acc += (mem_acc * 100 / mem_label_ids.size(0))
                 current_step = epoch * step_per_epoch + iter
 
-                if iter % (step_per_epoch / 8) == 0 or iter + 1 == step_per_epoch:
+                if iter % 100 ==0:
+                    if self.bmtrain:
+                        bmt.optim_step(self.optimizer)
+                        self.optimizer.zero_grad()
+                        bmt.optim_step(self.pretrained_optimizer)
+                        self.pretrained_optimizer.zero_grad()
+                    else:
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
+                        self.pretrained_optimizer.step()
+                        self.pretrained_optimizer.zero_grad()
+                # if iter % (step_per_epoch / 8) == 0 or iter + 1 == step_per_epoch:
                     mlm_total_acc_ = mlm_total_acc / (iter + 1.0)
                     mem_total_acc_ = mem_total_acc / (iter + 1.0)
                     mlm_loss_sum_ = mlm_loss_sum / (iter + 1.0)
@@ -416,5 +430,6 @@ class Trainer():
                 print("time:" + str(epoch_time))
             self.model.train()
             self.lr_scheduler.step() if not self.bmtrain else bmt.optim_step(self.lr_scheduler)
+            self.pretrained_lr_scheduler.step() if not self.bmtrain else bmt.optim_step(self.pretrained_lr_scheduler)
 
         return acc, mem_loss_sum

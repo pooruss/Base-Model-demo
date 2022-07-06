@@ -27,50 +27,13 @@ class CoKE(nn.Module):
         self.weight_sharing = config['weight_sharing']
         self.initializer_range = config['initializer_range']
         self.mask_id = config['mask_id']
-        self.e_mask_id = config['e_mask_id']
-        # embedding layer
-        self.embedding_layer = nn.ModuleDict({
-            'word_embedding': nn.Embedding(num_embeddings=self.voc_size, embedding_dim=self.emb_size, padding_idx=1),
-            'position_embedding': nn.Embedding(num_embeddings=self.max_position_seq_len, embedding_dim=self.emb_size),
-            'layer_norm': nn.LayerNorm(self.emb_size, eps=1e-12),
-            'dropout': nn.Dropout(p=self.dropout)
-        })
-
         self.config = BertConfig.from_pretrained(
             pretrained_model_name_or_path='/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/')
         self.bert = BertModel.from_pretrained(
             pretrained_model_name_or_path='/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/')
         self.config = self.bert.config
         self.dropout_layer = nn.Dropout(self.dropout)
-        self.classifier = nn.Linear(self.config.hidden_size, 2)
-
-        # transformer block
-        self.transformer_block = nn.ModuleDict({
-            'transformer_encoder':
-                nn.TransformerEncoder(
-                    nn.TransformerEncoderLayer(
-                        d_model=self.emb_size,
-                        nhead=self.n_head,
-                        dim_feedforward=self.intermediate_size,
-                        layer_norm_eps=1e-12,
-                        dropout=self.attention_dropout,
-                        activation='gelu'),
-                    num_layers=self.n_layer)
-        })
-
-        self.layer_norm = nn.LayerNorm(self.config.hidden_size, eps=1e-12)
-        self.linear1 = nn.Linear(in_features=self.config.hidden_size, out_features=self.config.hidden_size)
-        self.linear2 = nn.Linear(in_features=self.config.hidden_size, out_features=self.config.vocab_size, bias=True)
-        # self.linear2.weight = self.embedding_layer["word_embedding"].weight
-
-        self.mlm_fc = nn.Sequential(
-            nn.Linear(in_features=self.config.hidden_size, out_features=self.config.hidden_size),
-            nn.GELU(),
-            nn.LayerNorm(self.config.hidden_size, eps=1e-12),
-            nn.Linear(in_features=self.config.hidden_size, out_features=self.config.vocab_size, bias=True)
-        )
-
-        self.mem_fc = nn.Sequential(
+        self.mlm_ffn = nn.Sequential(
             nn.Linear(in_features=self.config.hidden_size, out_features=self.config.hidden_size),
             nn.GELU(),
             nn.LayerNorm(self.config.hidden_size, eps=1e-12),
@@ -122,8 +85,6 @@ class CoKE(nn.Module):
         input_mask = input_map['input_mask'].squeeze()
         position_ids = input_map['position_ids'].squeeze()
         segment_ids = input_map['segment_ids'].squeeze()
-        mlm_mask_pos = input_map['mlm_mask_pos'].squeeze()
-        mem_mask_pos = input_map['mem_mask_pos'].squeeze()
         # input_mask = input_map['input_mask'].squeeze(dim=1)
         # emb_out = self.embedding_layer["word_embedding"](src_ids) + \
         #           self.embedding_layer["position_embedding"](position_ids)
@@ -164,13 +125,15 @@ class CoKE(nn.Module):
         # enc_out = enc_out.transpose(0, 1)
         # enc_out = enc_out[src_ids == 50264]
         # # method 4
-        mlm_last_hidden_state = last_hidden_state.view(-1, self.config.hidden_size)[mlm_mask_pos.view(-1)]
-        mlm_last_hidden_state = self.mlm_fc(mlm_last_hidden_state.view(-1, self.config.hidden_size))
-        mem_last_hidden_state = last_hidden_state.view(-1, self.config.hidden_size)[mem_mask_pos.view(-1)]
-        mem_last_hidden_state = self.mem_fc(mem_last_hidden_state.view(-1, self.config.hidden_size))
+        # mlm_last_hidden_state = last_hidden_state.view(-1, self.config.hidden_size)[mlm_mask_pos.view(-1)]
+        # mlm_last_hidden_state = self.mlm_ffn(mlm_last_hidden_state.view(-1, self.config.hidden_size))
+        # mem_last_hidden_state = last_hidden_state.view(-1, self.config.hidden_size)[mem_mask_pos.view(-1)]
+        # mem_last_hidden_state = self.mem_ffn(mem_last_hidden_state.view(-1, self.config.hidden_size))
+        last_hidden_state = self.mlm_ffn(last_hidden_state)
+        # mlm_last_hidden_state = last_hidden_state.view(-1, self.config.vocab_size)[mlm_mask_pos.view(-1)]
+        # mem_last_hidden_state = last_hidden_state.view(-1, self.config.vocab_size)[mem_mask_pos.view(-1)]
         output_map = {
-            'mlm_last_hidden_state': mlm_last_hidden_state,
-            'mem_last_hidden_state': mem_last_hidden_state
+            'logits': last_hidden_state
             # 'pooled_output': pooled_output
         }
         return output_map

@@ -230,17 +230,7 @@ class CoKE_BMT(torch.nn.Module):
         self.dense = Linear(768, 2)
         bmt.init_parameters(self.dense)
         self.mask_id = config['mask_id']
-        self.e_mask_id = config['e_mask_id']
         self.mlm_ffn = FeedForward(
-            dim_in=768,
-            dim_ff=768,
-            dim_out=30522,
-            init_mean=0.0,
-            init_std=0.02,
-            dropout_p=0.15
-        )
-
-        self.mem_ffn = FeedForward(
             dim_in=768,
             dim_ff=768,
             dim_out=30522,
@@ -254,21 +244,15 @@ class CoKE_BMT(torch.nn.Module):
         input_mask = input_map['input_mask'].squeeze()
         position_ids = input_map['position_ids'].squeeze()
         segment_ids = input_map['segment_ids'].squeeze()
-        mlm_mask_pos = input_map['mlm_mask_pos'].squeeze()
-        mem_mask_pos = input_map['mem_mask_pos'].squeeze()
         last_hidden_state = self.bert(
             input_ids=src_ids,
             position_ids=position_ids,
             token_type_ids=segment_ids,
             attention_mask=input_mask,
         ).last_hidden_state
-        mlm_last_hidden_state = last_hidden_state.view(-1, 768)[mlm_mask_pos.view(-1)]
-        mlm_last_hidden_state = self.mlm_ffn(mlm_last_hidden_state.view(-1, 768))
-        mem_last_hidden_state = last_hidden_state.view(-1, 768)[mem_mask_pos.view(-1)]
-        mem_last_hidden_state = self.mem_ffn(mem_last_hidden_state.view(-1, 768))
+        last_hidden_state = self.mlm_ffn(last_hidden_state)
         output_map = {
-            'mlm_last_hidden_state': mlm_last_hidden_state,
-            'mem_last_hidden_state': mem_last_hidden_state
+            'logits': last_hidden_state
             # 'pooled_output': pooled_output
         }
         return output_map
