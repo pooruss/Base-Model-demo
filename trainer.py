@@ -436,6 +436,43 @@ class Trainer():
         hits_right = []
         hits = []
         device = torch.device("cuda", args.local_rank)
+
+        for iter, batch_data in enumerate(self.test_data_loader):
+            # fetch batch data
+            try:
+                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, \
+                mem_label_ids = batch_data
+            except RuntimeError:
+                print("One data instance's length should be 5, received {}.".format(len(batch_data)))
+                continue
+            if self.use_cuda:
+                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids = \
+                    src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
+                    pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device)
+
+            with torch.no_grad():
+                mlm_mask_pos = torch.argwhere(mlm_label_ids.reshape(-1) > 0)
+                mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos].squeeze()
+                mem_mask_pos = torch.argwhere(mem_label_ids.reshape(-1) > 0)
+                mem_label_ids = mem_label_ids.view(-1)[mem_mask_pos].squeeze()
+            input_x = {
+                'src_ids': src_ids,
+                'input_mask': input_mask,
+                'segment_ids': seg_ids,
+                'position_ids': pos_ids,
+                'mlm_mask_pos': mlm_mask_pos,
+                'mem_mask_pos': mem_mask_pos
+            }
+            torch.cuda.synchronize()
+            self.optimizer.zero_grad()
+
+            # forward
+            out = self.model(input_x)
+            mlm_last_hidden_state = out["mlm_last_hidden_state"]
+            mem_last_hidden_state = out["mem_last_hidden_state"]
+            preds.append(mem_last_hidden_state.detach().cpu().numpy())
+
+        '''
         for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Testing"):
 
             input_ids = input_ids.to(device)
@@ -470,7 +507,7 @@ class Trainer():
                 else:
                     hits[hits_level].append(0.0)
                     hits_right[hits_level].append(0.0)
-
+        '''
         for i in [0, 2, 9]:
             logger.info('Hits left @{0}: {1}'.format(i + 1, np.mean(hits_left[i])))
             logger.info('Hits right @{0}: {1}'.format(i + 1, np.mean(hits_right[i])))
