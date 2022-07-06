@@ -7,7 +7,9 @@ import bmtrain as bmt
 import numpy as np
 import time
 import tqdm
+import logging
 
+logger = logging.getLogger(__name__)
 
 def mask_tokens(vocab_size, tokenizer, inputs, mlm_prob):
     """ Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original. """
@@ -423,9 +425,35 @@ class Trainer():
 
         return acc, mem_loss_sum
 
-    def test(self):
+    def test(self, args):
         self.model.eval()
         preds = []
+        ranks = []
+        ranks_left = []
+        ranks_right = []
+
+        hits_left = []
+        hits_right = []
+        hits = []
+        device = torch.device("cuda", args.local_rank)
+        for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Testing"):
+
+            input_ids = input_ids.to(device)
+            input_mask = input_mask.to(device)
+            segment_ids = segment_ids.to(device)
+            label_ids = label_ids.to(device)
+
+            with torch.no_grad():
+                logits = model(input_ids, segment_ids, input_mask, labels=None)
+            if len(preds) == 0:
+                batch_logits = logits.detach().cpu().numpy()
+                preds.append(batch_logits)
+
+            else:
+                batch_logits = logits.detach().cpu().numpy()
+                preds[0] = np.append(preds[0], batch_logits, axis=0)
+
+
         for iter, batch_data in tqdm(enumerate(self.test_data_loader)):
 
             for hits_level in range(10):
