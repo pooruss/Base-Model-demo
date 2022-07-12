@@ -1,23 +1,11 @@
 # model config
-def init_coke_net_config(args, logger, print_config=True):
+def init_bert_net_config(args, logger, print_config=True):
     config = dict()
-    config["max_seq_len"] = args.max_seq_len
-    config["hidden_size"] = args.hidden_size
-    config["num_hidden_layers"] = args.num_hidden_layers
-    config["num_attention_heads"] = args.num_attention_heads
-    config["vocab_size"] = args.vocab_size
-    config["num_relations"] = args.num_relations
-    config["weight_sharing"] = args.weight_sharing
-    config["max_position_embeddings"] = args.max_position_embeddings
-    config["dropout"] = args.dropout
-    config["hidden_dropout"] = args.hidden_dropout
-    config["attention_dropout"] = args.attention_dropout
     config["initializer_range"] = args.initializer_range
-    config["intermediate_size"] = args.intermediate_size
     config["mask_id"] = args.mask_id
-    config['e_mask_id'] = args.e_mask_id
+    config["pretrained_path"] = args.pretrained_path
     if print_config is True:
-        logger.info('----------- CoKE Network Configuration -------------')
+        logger.info('----------- BMKG base model Network Configuration -------------')
         for arg, value in config.items():
             logger.info('%s: %s' % (arg, value))
         logger.info('------------------------------------------------')
@@ -35,7 +23,6 @@ def init_train_config(args, logger, print_config=True):
     config["epoch"] = args.epoch
     config["pad_id"] = args.padding_id
     config["mask_id"] = args.mask_id
-    config["e_mask_id"] = args.e_mask_id
     config["learning_rate"] = args.learning_rate
     config["weight_decay"] = args.weight_decay
     config["use_cuda"] = args.use_cuda
@@ -43,13 +30,12 @@ def init_train_config(args, logger, print_config=True):
     config["gpu_ids"] = args.gpu_ids
     config["node"] = args.node
     config["model_name"] = args.model_name
-    config["skip_steps"] = args.skip_steps
     config["save_path"] = args.save_path
-    config["soft_label"] = args.soft_label
     config["use_ema"] = args.use_ema
     config["ema_decay"] = args.ema_decay
     config["bmtrain"] = args.bmtrain
     config["checkpoint_num"] = args.checkpoint_num
+    config["task_name"] = args.task_name
 
     if print_config is True:
         logger.info('----------- Train Configuration -------------')
