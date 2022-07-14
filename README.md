@@ -11,9 +11,9 @@ Requirements:
 ```shell
 # /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237/
 # /home/wanghuadong/liangshihao/kg-bert-master/data/FB15k-237/
-python ./data/preprocess.py 18 38 512 train triple_text /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237-demo/
+sh data_preprocess.sh fb15k237 triple_text /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237-demo/ triple_text/
+sh data_preprocess.sh wn18rr triple_text /data/private/wanghuadong/liangshihao/BMKG/data/WN18RR/ triple_text/
 ```
-测试集、验证集把train改成test、dev即可
 
 #### to train
 ```shell
