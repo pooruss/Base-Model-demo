@@ -266,7 +266,7 @@ def main():
             target = mem_label_ids[j][mem_label_idx[j][0]: mem_label_idx[j][1]]
             test_target = np.array(entity2token_id[np.array([test[(iter * args.batch_size) + (j)]])[0]])
             assert (target == test_target).all()
-            target_len = 3
+
             filter_set = set()
             target_entity = test[(iter * args.batch_size) + (j)]
             target_rel = test_rel[(iter * args.batch_size) + (j)]
@@ -277,7 +277,7 @@ def main():
                     filter_set.add(_entity_id)
                 _entity_token_id = entity2token_id[entity]
                 entity_len = len(_entity_token_id)
-                preds = mem_probs_list[j][target_len - 1][0][mem_label_idx[j][0]: mem_label_idx[j][0] + entity_len]
+                preds = mem_probs_list[j][entity_len - 1][0][mem_label_idx[j][0]: mem_label_idx[j][0] + entity_len]
                 _entity_prob = preds[np.arange(entity_len), _entity_token_id]
                 entity_prob_list.append(np.mean(_entity_prob))
 
