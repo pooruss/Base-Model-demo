@@ -48,7 +48,6 @@ class Trainer():
         self.model_name = train_config["model_name"]
 
         self.do_train = train_config["do_train"]
-        self.do_val = train_config["do_val"]
         self.do_test = train_config["do_test"]
 
         self.use_cuda = train_config["use_cuda"]
@@ -122,68 +121,68 @@ class Trainer():
         self.log_file.write(str(len(self.val_data_loader)) + '\n')
         for iter, batch_data in enumerate(self.val_data_loader):
             # fetch batch data
-            try:
-                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids = batch_data
-            except RuntimeError:
-                print("One data instance's length should be 5, received {}.".format(len(batch_data)))
-                continue
-
-            # print("############ Path input data#############")
-            # print("input ids:{}".format(src_ids[0]))
-            # print("input masks:{}".format(input_mask[0]))
-            # print("segment ids:{}".format(seg_ids[0]))
-            # print("position ids:{}".format(pos_ids[0]))
-            # print("mlm label:{}".format(mlm_label_ids[0]))
-            # print("mem label:{}".format(mem_label_ids[0]))
-            # print("mem label idx:{}".format(mem_label_idx[0]))
-
-            if self.use_cuda:
-                src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids = \
-                    src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
-                    pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device)
             with torch.no_grad():
-                mlm_mask_pos = torch.argwhere(mlm_label_ids.reshape(-1) > 0)
-                mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos].squeeze()
-                mem_mask_pos = torch.argwhere(mem_label_ids.reshape(-1) > 0)
-                mem_label_ids = mem_label_ids.view(-1)[mem_mask_pos].squeeze()
+                try:
+                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids = batch_data
+                except RuntimeError:
+                    print("One data instance's length should be 5, received {}.".format(len(batch_data)))
+                    continue
 
-            input_x = {
-                'src_ids': src_ids,
-                'input_mask': input_mask,
-                'segment_ids': seg_ids,
-                'position_ids': pos_ids
-            }
-            torch.cuda.synchronize()
-            self.optimizer.zero_grad()
+                print("############ Path input data#############")
+                print("input ids:{}".format(src_ids[0]))
+                print("input masks:{}".format(input_mask[0]))
+                print("segment ids:{}".format(seg_ids[0]))
+                print("position ids:{}".format(pos_ids[0]))
+                print("mlm label:{}".format(mlm_label_ids[0]))
+                print("mem label:{}".format(mem_label_ids[0]))
+                print("mem label idx:{}".format(mem_label_idx[0]))
 
-            # forward
-            logits = self.model(input_x)["logits"]
-            mlm_last_hidden_state = logits.view(-1, self.vocab_size)[mlm_mask_pos.view(-1)]
-            mem_last_hidden_state = logits.view(-1, self.vocab_size)[mem_mask_pos.view(-1)]
-            # calc mlm_loss
-            mlm_loss = self.loss_function(
-                input=mlm_last_hidden_state,
-                target=mlm_label_ids.squeeze()
-            )
-            mem_label_ids = mem_label_ids.view(-1, 1).squeeze()
-            mem_loss = self.loss_function(
-                input=mem_last_hidden_state,
-                target=mem_label_ids
-            )
+                if self.use_cuda:
+                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids = \
+                        src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
+                        pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device)
 
-            if self.bmtrain:
-                loss = (mlm_loss + mem_loss)
-                mlm_global_loss = bmt.sum_loss(mlm_loss).item()
-                mem_global_loss = bmt.sum_loss(mem_loss).item()
-                mlm_loss_sum += mlm_global_loss
-                mem_loss_sum += mem_global_loss
-            else:
-                mlm_loss_sum += mlm_loss.data
-                mem_loss_sum += mem_loss.data
-            mlm_acc = mlm_last_hidden_state.max(dim=1)[1].eq(mlm_label_ids.squeeze()).sum()
-            mlm_total_acc += (mlm_acc * 100 / mlm_label_ids.size(0))
-            mem_acc = mem_last_hidden_state.max(dim=1)[1].eq(mem_label_ids.squeeze()).sum()
-            mem_total_acc += (mem_acc * 100 / mem_label_ids.size(0))
+                    mlm_mask_pos = torch.argwhere(mlm_label_ids.reshape(-1) > 0)
+                    mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos].squeeze()
+                    mem_mask_pos = torch.argwhere(mem_label_ids.reshape(-1) > 0)
+                    mem_label_ids = mem_label_ids.view(-1)[mem_mask_pos].squeeze()
+
+                input_x = {
+                    'src_ids': src_ids,
+                    'input_mask': input_mask,
+                    'segment_ids': seg_ids,
+                    'position_ids': pos_ids
+                }
+                torch.cuda.synchronize()
+
+                # forward
+                logits = self.model(input_x)["logits"]
+                mlm_last_hidden_state = logits.view(-1, self.vocab_size)[mlm_mask_pos.view(-1)]
+                mem_last_hidden_state = logits.view(-1, self.vocab_size)[mem_mask_pos.view(-1)]
+                # calc mlm_loss
+                mlm_loss = self.loss_function(
+                    input=mlm_last_hidden_state,
+                    target=mlm_label_ids.squeeze()
+                )
+                mem_label_ids = mem_label_ids.view(-1, 1).squeeze()
+                mem_loss = self.loss_function(
+                    input=mem_last_hidden_state,
+                    target=mem_label_ids
+                )
+
+                if self.bmtrain:
+                    loss = (mlm_loss + mem_loss)
+                    mlm_global_loss = bmt.sum_loss(mlm_loss).item()
+                    mem_global_loss = bmt.sum_loss(mem_loss).item()
+                    mlm_loss_sum += mlm_global_loss
+                    mem_loss_sum += mem_global_loss
+                else:
+                    mlm_loss_sum += mlm_loss.data
+                    mem_loss_sum += mem_loss.data
+                mlm_acc = mlm_last_hidden_state.max(dim=1)[1].eq(mlm_label_ids.squeeze()).sum()
+                mlm_total_acc += (mlm_acc * 100 / mlm_label_ids.size(0))
+                mem_acc = mem_last_hidden_state.max(dim=1)[1].eq(mem_label_ids.squeeze()).sum()
+                mem_total_acc += (mem_acc * 100 / mem_label_ids.size(0))
 
         # acc = acc * 100 / float(len(self.val_data_loader.dataset))
         mlm_total_acc = mlm_total_acc / float(len(self.val_data_loader))
@@ -234,15 +233,14 @@ class Trainer():
         self.log_file.write("LR:{}".format(str(self.learning_rate)) + '\n')
         self.log_file.write("BATCHSIZE:{}".format(str(self.batch_size)) + '\n')
         self.log_file.write("TASK:{}".format(self.task_name) + '\n')
-        for name, params in self.model.named_parameters():
-            self.log_file.write(name + '\n')
+        # for name, params in self.model.named_parameters():
+        #     self.log_file.write(name + '\n')
         self.model.train()
         if self.use_ema:
             self.ema_model.register()
         step_per_epoch = len(self.train_data_loader)
         total_train_step = step_per_epoch * self.epoch
         save_step = math.ceil(total_train_step / self.node / self.gpus / self.checkpoint_num)
-        print(save_step)
         for epoch in range(self.epoch):
             acc, mlm_loss_sum, mem_loss_sum, mlm_total_acc, mem_total_acc = 0.0, 0.0, 0.0, 0.0, 0.0
             neg_loss_sum = 0
@@ -251,8 +249,8 @@ class Trainer():
             for iter, batch_data in enumerate(self.train_data_loader):
                 # fetch batch data
                 try:
-                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, negatives, \
-                    mem_label_idx = batch_data
+                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, mem_label_idx, \
+                        mrm_src_ids, mrm_label_ids= batch_data
                 except RuntimeError:
                     print("One data instance's length should be 5, received {}.".format(len(batch_data)))
                     continue
@@ -267,15 +265,17 @@ class Trainer():
                 # print("mem label idx:{}".format(mem_label_idx[0]))
 
                 if self.use_cuda:
-                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, mem_label_idx = \
+                    src_ids, input_mask, seg_ids, pos_ids, mlm_label_ids, mem_label_ids, mem_label_idx, mrm_src_ids, mrm_label_ids = \
                         src_ids.to(self.device), input_mask.to(self.device), seg_ids.to(self.device), \
                         pos_ids.to(self.device), mlm_label_ids.to(self.device), mem_label_ids.to(self.device), \
-                        mem_label_idx.to(self.device)
+                        mem_label_idx.to(self.device), mrm_src_ids.to(self.device), mrm_label_ids.to(self.device)
                 with torch.no_grad():
                     mlm_mask_pos = torch.argwhere(mlm_label_ids.reshape(-1) > 0)
                     mlm_label_ids = mlm_label_ids.view(-1)[mlm_mask_pos].squeeze()
                     mem_mask_pos = torch.argwhere(mem_label_ids.reshape(-1) > 0)
                     mem_label_ids = mem_label_ids.view(-1)[mem_mask_pos].squeeze()
+                    mrm_mask_pos = torch.argwhere(mrm_label_ids.reshape(-1) > 0)
+                    mrm_label_ids = mrm_label_ids.view(-1)[mrm_mask_pos].squeeze()
 
                 input_x = {
                     'src_ids': src_ids,
@@ -301,6 +301,8 @@ class Trainer():
                     target=mem_label_ids.long()
                 )
                 neg_mem_loss = mem_loss
+
+                print(self.model.linear2.weight)
                 # backward
                 if self.bmtrain:
                     mlm_global_loss = bmt.sum_loss(mlm_loss).item()
@@ -384,7 +386,6 @@ class Trainer():
                             str(mem_acc.cpu().detach().numpy()),
                             str(neg_mem_loss.cpu().detach().numpy()), str(lr)
                         ) + '\n')
-                    self.log_file.flush()
 
                 if self.bmtrain:
                     bmt.optim_step(self.optimizer)
@@ -397,8 +398,9 @@ class Trainer():
                     # self.pretrained_optimizer.step()
                     # self.pretrained_optimizer.zero_grad()
 
-                # if iter % save_step == 0 and iter != 0:
-                if iter % 1000 == 0 and iter != 0:
+                if iter % save_step == 0 and iter != 0:
+                # if iter % 1000 == 0 and iter != 0:
+                    self.model.eval()
                     if isinstance(self.model, torch.nn.DataParallel):
                         torch.save(self.model.module.state_dict(),
                                    self.save_path + '{}_lr{}_bs{}_ema{}_epoch{}.pt'.format(
@@ -413,8 +415,10 @@ class Trainer():
                             self.model_name, self.learning_rate,
                             self.batch_size, str(self.use_ema), str(epoch)))
                     self.validation(epoch)
+                    self.log_file.flush()
 
             if (epoch + 1) % 3 == 0:
+                self.model.eval()
                 if isinstance(self.model, torch.nn.DataParallel):
                     torch.save(self.model.module.state_dict(),
                                self.save_path + '{}_lr{}_bs{}_ema{}_epoch{}.pt'.format(
@@ -429,6 +433,7 @@ class Trainer():
                         self.model_name, self.learning_rate,
                         self.batch_size, str(self.use_ema), str(epoch)))
                 self.validation(epoch)
+
                 self.lr_scheduler.step() if not self.bmtrain else bmt.optim_step(self.lr_scheduler)
 
             epoch_time = time.time() - start_time

@@ -4,30 +4,23 @@ Requirements:
 
 - torch ==1.11.0
 
-#### to train
+
+
+#### data preprocess
 
 ```shell
 # /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237/
 # /home/wanghuadong/liangshihao/kg-bert-master/data/FB15k-237/
-python ./main.py \
---data_root /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237/ \
---use_cuda True \
---vocab_size 50265 \
---max_seq_len 512 \
---task_name triple \
---pretrained_embed_path ./checkpoints/transe.ckpt \
---use_ema False \
---model_name bert_base \
---checkpoint_num 50 \
---batch_size 8 \
---learning_rate 1e-5 \
---gpu_ids 0 \
---soft_label False \
---weight_decay 0.0001 \
---use_pretrain False \
---save_path ./checkpoints/bert-base/ \
---epoch 10 \
---bmtrain False
+python ./data/preprocess.py 18 38 512 train triple_text /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237-demo/
+```
+测试集、验证集把train改成test、dev即可
+
+#### to train
+```shell
+# /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237/
+# /home/wanghuadong/liangshihao/kg-bert-master/data/FB15k-237/
+sh train_fb15k237.sh torch triple_text 0 /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237-demo/
+sh train_wn18rr.sh torch triple_text 0 /data/private/wanghuadong/liangshihao/BMKG/data/WN18RR/
 ```
 
 ```shell
@@ -39,23 +32,32 @@ NODE_RANK=0
 GPUS_PER_NODE=1
 NPROC_PER_NODE=4
 torchrun --standalone --nnodes=1 --nproc_per_node=$NPROC_PER_NODE ./main.py \
---data_root /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237/ \
+--data_root /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237-demo/ \
 --use_cuda True \
 --vocab_size 50265 \
 --max_seq_len 512 \
---task_name triple \
 --pretrained_embed_path ./checkpoints/transe.ckpt \
 --use_ema False \
 --model_name bert_base \
 --checkpoint_num 50 \
---batch_size 8 \
---learning_rate 1e-5 \
+--batch_size 128 \
+--learning_rate 1e-3 \
 --gpu_ids 0 \
 --soft_label False \
 --weight_decay 0.0001 \
 --use_pretrain False \
 --save_path ./checkpoints/bert-base/ \
---epoch 10 \
---bmtrain True
+--epoch 50 \
+--bmtrain True \
+--task_name path_text
+```
+
+#### to test
+
+```shell
+# /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237/
+# /home/wanghuadong/liangshihao/kg-bert-master/data/FB15k-237/
+sh test_fb15k237.sh torch triple_text 0 ckpt_dir result_save_dir result_file_name
+sh test_wn18rr.sh torch triple_text 0 ckpt_dir result_save_dir result_file_name
 ```
 

@@ -25,11 +25,13 @@ class BertBase(nn.Module):
         self.bias = nn.Parameter(torch.zeros(self.config.vocab_size))
         self.linear2.bias = self.bias
 
-        self.init_parameters()
         self.bert = BertModel.from_pretrained(
             pretrained_model_name_or_path='/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/')
 
-        self.linear2.weight = nn.Parameter(self.bert.embeddings.word_embeddings.weight)
+        if config["do_train"]:
+            self.init_parameters()
+            self.linear2.weight = nn.Parameter(self.bert.embeddings.word_embeddings.weight)
+            # print("embedding weight sharing")
         self.mlm_ffn = nn.Sequential(
             self.linear1,
             nn.GELU(),
@@ -55,10 +57,10 @@ class BertBase(nn.Module):
                 m.weight.data.fill_(1.0)
 
     def forward(self, input_map):
-        src_ids = input_map['src_ids'].squeeze()
-        input_mask = input_map['input_mask'].squeeze()
-        position_ids = input_map['position_ids'].squeeze()
-        segment_ids = input_map['segment_ids'].squeeze()
+        src_ids = input_map['src_ids']
+        input_mask = input_map['input_mask']
+        position_ids = input_map['position_ids']
+        segment_ids = input_map['segment_ids']
         enc_out = self.bert(
             input_ids=src_ids,
             position_ids=position_ids,

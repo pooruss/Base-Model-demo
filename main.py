@@ -13,7 +13,7 @@ import logging
 import argparse
 from config.args import ArgumentGroup
 from model_center.dataset import DistributedDataLoader
-from data import MLMFeaturesWithNeg
+from data import MLMFeaturesWithNeg, MLERMFeatures
 
 # import wandb
 
@@ -35,11 +35,6 @@ logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
 
-task_g = ArgumentGroup(parser, "task", "which task to run.")
-task_g.add_arg("do_train", bool, True, "Train")
-task_g.add_arg("do_val", bool, True, "Validation")
-task_g.add_arg("do_test", bool, False, "Test")
-
 model_g = ArgumentGroup(parser, "model", "model configuration and paths.")
 # model_g.add_arg("model_name", str, "coke_roberta", "Model name")
 
@@ -47,7 +42,7 @@ model_g.add_arg("initializer_range", int, 0.02, "CoKE model config: initializer_
 
 train_g = ArgumentGroup(parser, "training", "training options.")
 train_g.add_arg("node", int, 1, "Node nums.")
-train_g.add_arg("warmup_epoch", int, 4, "Number of epoches for training.")
+train_g.add_arg("warmup_epoch", int, 1, "Number of epoches for training.")
 train_g.add_arg("warmup_proportion", float, 0.1,
                 "Proportion of training steps to perform linear learning rate warmup for.")
 # train_g.add_arg("weight_decay", float, 0.0001, "Weight decay rate for L2 regularizer.")
@@ -70,6 +65,8 @@ parser.add_argument("--pretrained_path", default='./', type=str, required=True, 
 parser.add_argument("--gpu_ids", default='0', type=str, required=True, help="gpu ids.")
 parser.add_argument("--model_name", default='coke', type=str, required=True, help="coke or coke_roberta.")
 parser.add_argument("--bmtrain", default=False, type=boolean_string, help="use bmtrain or not.")
+parser.add_argument("--do_train", default=False, type=boolean_string, help="use bmtrain or not.")
+parser.add_argument("--do_test", default=False, type=boolean_string, help="use bmtrain or not.")
 
 args = parser.parse_args()
 

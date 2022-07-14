@@ -1,3 +1,4 @@
+import sys
 import os
 import json
 import numpy as np
@@ -14,7 +15,7 @@ import argparse
 from config.args import ArgumentGroup
 import bmtrain as bmt
 from model_center.dataset import DistributedDataLoader
-from data import MLMFeaturesWithNeg
+from data import MLMFeaturesWithNeg, MLERMFeatures
 
 
 def boolean_string(s):
@@ -32,11 +33,6 @@ logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
 
-task_g = ArgumentGroup(parser, "task", "which task to run.")
-task_g.add_arg("do_train", bool, True, "Train")
-task_g.add_arg("do_val", bool, True, "Validation")
-task_g.add_arg("do_test", bool, False, "Test")
-
 model_g = ArgumentGroup(parser, "model", "model configuration and paths.")
 # model_g.add_arg("model_name", str, "coke_roberta", "Model name")
 model_g.add_arg("initializer_range", int, 0.02, "CoKE model config: initializer_range")
@@ -53,7 +49,10 @@ parser.add_argument("--model_name", default='coke', type=str, required=True, hel
 parser.add_argument("--bmtrain", default=False, type=boolean_string, help="use bmtrain or not.")
 parser.add_argument("--ckpt_path", default='.', type=str, required=True, help="save directory.")
 parser.add_argument("--save_path", default='.', type=str, required=True, help="save directory.")
+parser.add_argument("--save_file", default='.', type=str, required=True, help="save directory.")
 parser.add_argument("--pretrained_path", default='.', type=str, required=True, help="save directory.")
+parser.add_argument("--do_train", default=False, type=boolean_string, help="use bmtrain or not.")
+parser.add_argument("--do_test", default=False, type=boolean_string, help="use bmtrain or not.")
 
 args = parser.parse_args()
 
@@ -106,7 +105,9 @@ def main():
     ent2alias = {}
     ent2text = {}
     entity2token_id = {}
+    mean_entity_len = 0.0
     with open(os.path.join(args.data_root, "entity2text.txt"), 'r', encoding='utf-8') as f:
+        total_len = 0.0
         ent_lines = f.readlines()
         for line in ent_lines:
             temp = line.strip().split('\t')
@@ -119,6 +120,9 @@ def main():
                     ent2text[temp[0]] = temp[1][end:]
                 entity = test_dataset.tokenizer.tokenize(ent2alias[temp[0]])
                 entity2token_id[temp[0]] = test_dataset.tokenizer.convert_tokens_to_ids(entity)
+                entity_len = len(entity2token_id[temp[0]])
+                total_len += entity_len
+        print(total_len/len(ent_lines))
 
     if args.data_root.find("FB15") != -1:
         ent2text = {}
@@ -133,12 +137,9 @@ def main():
     for idx, entity in enumerate(entities):
         id2entity[idx] = entity
 
-    test_lines = test_dataset.get_test_triples(args.data_root)
-    test = []
-    test_rel = []
-    mask_type_list = []
+    all_lines = test_dataset.get_all_triples(args.data_root)
     filter_dict = {}
-    for line in test_lines:
+    for line in all_lines:
         if len(line) == 3:
             head, rel, tail = line
         else:
@@ -155,14 +156,23 @@ def main():
             filter_dict[tail][rel] = []
         filter_dict[tail][rel].append(head)
 
-        if head in ent2text:
-            test.append(tail)
-            test_rel.append(rel)
-            mask_type_list.append('tail')
-        if tail in ent2text:
-            test.append(head)
-            test_rel.append(rel)
-            mask_type_list.append('head')
+    test_lines = test_dataset.get_test_triples(args.data_root)
+    test = []
+    test_rel = []
+    mask_type_list = []
+    mean_entity_len = 0.0
+    total_len = 0
+    for line in test_lines:
+        if len(line) == 3:
+            head, rel, tail = line
+        else:
+            head, rel, tail = line[0], line[1] + line[3], line[4]
+        test.append(tail)
+        test_rel.append(rel)
+        mask_type_list.append('tail')
+        test.append(head)
+        test_rel.append(rel)
+        mask_type_list.append('head')
 
     # ------------
     # model
@@ -189,8 +199,9 @@ def main():
         if args.gpus > 1:
             model = nn.DataParallel(model, device_ids=device_ids)
         state_dict = torch.load(args.ckpt_path, map_location=device)
-        # for name in state_dict:
-        #     print(name)
+        for name, param in state_dict.items():
+            if "linear2" in name:
+                print(param)
         model.load_state_dict(state_dict)
         model.to(device=device)
 
@@ -206,69 +217,68 @@ def main():
     realtime_mr, realtime_mr_rate = 0.0, 0.0
     realtime_mrr, realtime_mrr_rate = 0.0, 0.0
     count = 0
+    mem_total_acc = 0.0
     for iter, batch_data in tqdm(enumerate(test_data_loader)):
         # fetch batch data
         try:
-            if "alias" in args.task_name:
-                src_ids, input_mask, seg_ids, pos_ids, mem_label_ids = batch_data
-            else:
-                src_ids, input_mask, seg_ids, pos_ids, mem_label_ids, mem_label_idx, mask_types = batch_data
+            src_ids, input_mask, seg_ids, pos_ids, mem_label_ids, mem_label_idx, mask_types = batch_data
         except RuntimeError:
             print("One data instance's length should be 5, received {}.".format(len(batch_data)))
             continue
         if args.use_cuda:
-            if "alias" in args.task_name:
-                src_ids, input_mask, seg_ids, pos_ids, mem_label_ids = \
-                    src_ids.to(device), input_mask.to(device), seg_ids.to(device), \
-                    pos_ids.to(device), mem_label_ids.to(device)
-            else:
-                src_ids, input_mask, seg_ids, pos_ids, mem_label_idx = \
-                    src_ids.to(device), input_mask.to(device), seg_ids.to(device), \
-                    pos_ids.to(device), mem_label_idx.to(device)
+            src_ids, input_mask, seg_ids, pos_ids, mem_label_idx, mem_label_ids = \
+                src_ids.to(device), input_mask.to(device), seg_ids.to(device), \
+                pos_ids.to(device), mem_label_idx.to(device), mem_label_ids.to(device)
+        mem_probs_list = []
+        for j in range(args.batch_size):
+            temp_seg = seg_ids[j]
+            temp_pos = pos_ids[j]
+            temp_src = src_ids[j]
+            temp_src[mem_label_idx[j][0]:mem_label_idx[j][1]+1] = 0
+            temp_input_mask = input_mask[j]
+            temp_input_mask[mem_label_idx[j][0]:mem_label_idx[j][1]+1] = 0
+            temp_prob_list = []
+            for i in range(18):
+                temp_src[mem_label_idx[j][0]: mem_label_idx[j][0]+i+1] = test_dataset.mask_id
+                try:
+                    temp_src[mem_label_idx[j][0]+i+1] = test_dataset.ent_end_id
+                except:
+                    print(temp_src)
+                temp_input_mask[mem_label_idx[j][0]: mem_label_idx[j][0]+i+2] = 1
 
-        input_x = {
-            'src_ids': src_ids,
-            'input_mask': input_mask,
-            'segment_ids': seg_ids,
-            'position_ids': pos_ids
-        }
-        # forward
-        mem_probs = model(input_x)["logits"]
-        mem_probs = mem_probs.cpu().detach().numpy()
+                input_x = {
+                    'src_ids': temp_src.unsqueeze(dim=0),
+                    'input_mask': temp_input_mask.unsqueeze(dim=0),
+                    'segment_ids': temp_seg.unsqueeze(dim=0),
+                    'position_ids': temp_pos.unsqueeze(dim=0)
+                }
+                # forward
+                mem_probs = model(input_x)["logits"]
+                mem_probs = list(mem_probs.cpu().detach().numpy())
+                temp_prob_list.append(mem_probs)
+            mem_probs_list.append(temp_prob_list)
+
         mem_label_idx = mem_label_idx.cpu().detach().numpy()
         mem_label_ids = mem_label_ids.cpu().detach().numpy()
-        for j in range(len(mem_probs)):
-            # if mask_types[j] != 'tail':
-            #     continue
+        mem_probs_list = np.array(mem_probs_list)
+
+        for j in range(args.batch_size):
             target = mem_label_ids[j][mem_label_idx[j][0]: mem_label_idx[j][1]]
             test_target = np.array(entity2token_id[np.array([test[(iter * args.batch_size) + (j)]])[0]])
             assert (target == test_target).all()
-
-            # if iter > 44:
-            #     print(target)
-            preds = mem_probs[j][mem_label_idx[j][0]: mem_label_idx[j][0] + args.max_ans_len]
-            # preds = mem_probs[j][mem_label_idx[j][0]-1]
-            # print(preds.shape)
-            entity_prob_list = []
-            # target_prob = preds[np.arange(len(target)), target]
-            # if iter > 44:
-            #     print("target_prob:", np.mean(target_prob))
+            target_len = 3
             filter_set = set()
             target_entity = test[(iter * args.batch_size) + (j)]
             target_rel = test_rel[(iter * args.batch_size) + (j)]
+            entity_prob_list = []
             for idx, _entity_id in enumerate(range(len(id2entity))):
                 entity = id2entity[_entity_id]
                 if entity in filter_dict[target_entity][target_rel] and entity != target_entity:
                     filter_set.add(_entity_id)
-                _entity_token_id = entity2token_id[id2entity[_entity_id]]
-                if len(_entity_token_id) > args.max_ans_len:
-                    _entity_prob = preds[np.arange(args.max_ans_len), _entity_token_id[:args.max_ans_len]]
-                else:
-                    _entity_prob = preds[np.arange(len(_entity_token_id)), _entity_token_id]
-                # _entity_prob = preds
-                # print(_entity_token_id)
-                # print('_entity_prob: ', _entity_prob)
-                # print('_entity_mean_prob: ', np.mean(_entity_prob))
+                _entity_token_id = entity2token_id[entity]
+                entity_len = len(_entity_token_id)
+                preds = mem_probs_list[j][target_len - 1][0][mem_label_idx[j][0]: mem_label_idx[j][0] + entity_len]
+                _entity_prob = preds[np.arange(entity_len), _entity_token_id]
                 entity_prob_list.append(np.mean(_entity_prob))
 
             topk_entity_idx = np.argsort(entity_prob_list)[::-1]  # [:10]
@@ -276,14 +286,15 @@ def main():
             for id in topk_entity_idx:
                 if id not in filter_set:
                     topk_entity.append(id2entity[id])
-            # topk_entity = [id2entity[_id] for _id in topk_entity_idx]
+
             topk_entity_list.append(topk_entity)
 
             test_list = []
             test_list.append(topk_entity)
             test_array = np.array(test_list)
             target = np.array([test[(iter * args.batch_size) + (j)]])
-            test_hits1, test_hits3, test_hits10, test_MR, test_MRR = eval_fn(target, test_array, realtime_mr_rate , realtime_mrr_rate)
+            test_hits1, test_hits3, test_hits10, test_MR, test_MRR = eval_fn(target, test_array, realtime_mr_rate,
+                                                                             realtime_mrr_rate)
 
             realtime_hits10 += test_hits10
             realtime_hits3 += test_hits3

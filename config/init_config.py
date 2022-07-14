@@ -3,6 +3,8 @@ def init_bert_net_config(args, logger, print_config=True):
     config = dict()
     config["initializer_range"] = args.initializer_range
     config["mask_id"] = args.mask_id
+    config["do_train"] = args.do_train
+    config["do_test"] = args.do_test
     config["pretrained_path"] = args.pretrained_path
     if print_config is True:
         logger.info('----------- BMKG base model Network Configuration -------------')
@@ -16,7 +18,6 @@ def init_bert_net_config(args, logger, print_config=True):
 def init_train_config(args, logger, print_config=True):
     config = dict()
     config["do_train"] = args.do_train
-    config["do_val"] = args.do_val
     config["do_test"] = args.do_test
     config["batch_size"] = args.batch_size
     config["vocab_size"] = args.vocab_size

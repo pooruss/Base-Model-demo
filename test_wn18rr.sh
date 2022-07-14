@@ -5,14 +5,13 @@ TASK=${2}
 GPU_IDS=${3}
 ckpt_path=${4}
 save_path=${5}
-save_file=${6}
 
-export MAX_SEQ_LEN=512
-export BATCH_SIZE=32
+export MAX_SEQ_LEN=192
+export BATCH_SIZE=64
 export NPROC_PER_NODE=4
-export DATA_ROOT=/data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237-demo/
+export DATA_ROOT=/data/private/wanghuadong/liangshihao/BMKG/data/WN18RR/
 export PRETRAINED_PATH=/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/
-export MAX_ANS_LEN=18
+export MAX_ANS_LEN=17
 
 
 if [ ${frame} = 'bmtrain'];
@@ -35,10 +34,7 @@ then
   --task_name ${TASK} \
   --ckpt_path ${ckpt_path} \
   --save_path ${save_path} \
-  --save_file ${save_file} \
-  --pretrained_path ${PRETRAINED_PATH} \
-  --do_train False \
-  --do_test True
+  --pretrained_path ${PRETRAINED_PATH}
 
 else
   python ./evaluation.py \
@@ -53,8 +49,8 @@ else
   --task_name ${TASK} \
   --ckpt_path ${ckpt_path} \
   --save_path ${save_path} \
-  --save_file ${save_file} \
-  --pretrained_path ${PRETRAINED_PATH} \
-  --do_train False \
-  --do_test True
+  --pretrained_path ${PRETRAINED_PATH}
 fi
+
+
+
