@@ -301,8 +301,6 @@ class Trainer():
                     target=mem_label_ids.long()
                 )
                 neg_mem_loss = mem_loss
-
-                print(self.model.linear2.weight)
                 # backward
                 if self.bmtrain:
                     mlm_global_loss = bmt.sum_loss(mlm_loss).item()
@@ -417,7 +415,7 @@ class Trainer():
                     self.validation(epoch)
                     self.log_file.flush()
 
-            if (epoch + 1) % 3 == 0:
+            if (epoch + 1) % 10 == 0:
                 self.model.eval()
                 if isinstance(self.model, torch.nn.DataParallel):
                     torch.save(self.model.module.state_dict(),
