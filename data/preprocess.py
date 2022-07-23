@@ -1,9 +1,12 @@
 """ data preprocess
 """
+from doctest import testfile
+from operator import neg
 from torch.utils.data import Dataset
 import os
 import csv
 import sys
+import json
 import collections
 import logging
 import torch
@@ -22,7 +25,7 @@ logger.info(logger.getEffectiveLevel())
 torch.manual_seed(1)
 
 
-def mask_tokens(vocab_size, tokenizer, inputs, mlm_prob):
+def do_mask_ids(vocab_size, tokenizer, inputs, mlm_prob, mask_id):
     """ Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original. """
     labels = torch.from_numpy(np.array(inputs)).clone()
     inputs_tensor = torch.from_numpy(np.array(inputs)).clone()
@@ -41,7 +44,7 @@ def mask_tokens(vocab_size, tokenizer, inputs, mlm_prob):
     mask_indices通过bool()函数转成True,False
     下面对于85%原始数据 没有被mask的位置进行赋值为-1
     """
-    labels[~masked_indices] = 0  # We only compute loss on masked tokens
+    labels[~masked_indices] = -1  # We only compute loss on masked tokens
 
     # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
     """
@@ -51,7 +54,8 @@ def mask_tokens(vocab_size, tokenizer, inputs, mlm_prob):
     """
     indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
     # print(inputs_tensor)
-    inputs_tensor[indices_replaced] = tokenizer.convert_tokens_to_ids(["[MASK]"])[0]
+    inputs_tensor[indices_replaced] = mask_id
+    inputs_tensor = inputs_tensor.long()
     # print(inputs_tensor)
     # 10% of the time, we replace masked input tokens with random word
     """
@@ -63,50 +67,18 @@ def mask_tokens(vocab_size, tokenizer, inputs, mlm_prob):
     return list(np.array(inputs_tensor)), list(np.array(labels))
 
 
-class MLMFeatures(object):
-    """A single set of features of data."""
-
-    def __init__(self, src_ids, segment_ids, position_ids, input_mask, mlm_label_ids,
-                 mem_label_ids, mem_label_idx, mask_type):
-        self.src_ids = src_ids
-        self.segment_ids = segment_ids
-        self.position_ids = position_ids
-        self.input_mask = input_mask
-        self.mlm_label_ids = mlm_label_ids
-        self.mem_label_ids = mem_label_ids
-        self.mem_label_idx = mem_label_idx
-        self.mask_type = mask_type
-
-
-class MLMFeaturesWithNeg(object):
-    """A single set of features of data."""
-
-    def __init__(self, src_ids, segment_ids, position_ids, input_mask, mlm_label_ids,
-                 mem_label_ids, mem_label_idx, mask_type):
-        self.src_ids = src_ids
-        self.segment_ids = segment_ids
-        self.position_ids = position_ids
-        self.input_mask = input_mask
-        self.mlm_label_ids = mlm_label_ids
-        self.mem_label_ids = mem_label_ids
-        self.mem_label_idx = mem_label_idx
-        self.mask_type = mask_type
-
-
 class MLERMFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, src_ids, segment_ids, position_ids, input_mask, mlm_label_ids,
-                 mem_label_ids, mem_label_idx, r_src_ids, mrm_label_ids, mask_type):
+    def __init__(self, src_ids, input_mask, mlm_label_ids,
+                 mem_label_ids, mem_label_idx, pos_neg_seq, margin_labels, mask_type):
         self.src_ids = src_ids
-        self.segment_ids = segment_ids
-        self.position_ids = position_ids
         self.input_mask = input_mask
         self.mlm_label_ids = mlm_label_ids
         self.mem_label_ids = mem_label_ids
         self.mem_label_idx = mem_label_idx
-        self.r_src_ids = r_src_ids
-        self.mrm_label_ids = mrm_label_ids
+        self.pos_neg_seq = pos_neg_seq
+        self.margin_labels = margin_labels
         self.mask_type = mask_type
 
 
@@ -142,38 +114,37 @@ class DataProcessor(object):
 class KGProcessor(DataProcessor):
     """Processor for knowledge graph data set."""
 
-    def __init__(self, data_dir, tokenizer, max_entity_len=16, max_rel_len=8, max_mlm_seq_len=512, neg_nums=0,
-                 ignore=True):
+    def __init__(self, data_dir, tokenizer, max_entity_len=16, max_rel_len=8, max_mlm_seq_len=512, neg_nums=3,
+                 ignore=True, save_dir=''):
         self.labels = set()
         self.tokenizer = tokenizer
         self.max_len = max_mlm_seq_len
         self.max_entity_len = max_entity_len
         self.max_rel_len = max_rel_len
-        self.cls_id = [self.tokenizer.convert_tokens_to_ids("[CLS]")]
-        self.sep_id = [self.tokenizer.convert_tokens_to_ids("[SEP]")]
-        self.ent_begin_id = [self.tokenizer.convert_tokens_to_ids("[EB]")]
-        self.ent_end_id = [self.tokenizer.convert_tokens_to_ids("[EE]")]
-        self.rel_begin_id = [self.tokenizer.convert_tokens_to_ids("[RB]")]
-        self.rel_end_id = [self.tokenizer.convert_tokens_to_ids("[RE]")]
-        self.invert_rel_begin_id = [self.tokenizer.convert_tokens_to_ids("[IRB]")]
-        self.invert_rel_end_id = [self.tokenizer.convert_tokens_to_ids("[IRE]")]
-        self.path_begin_id = [self.tokenizer.convert_tokens_to_ids("[PB]")]
-        self.path_end_id = [self.tokenizer.convert_tokens_to_ids("[PE]")]
-        self.invert_path_begin_id = [self.tokenizer.convert_tokens_to_ids("[IPB]")]
-        self.invert_path_end_id = [self.tokenizer.convert_tokens_to_ids("[IPE]")]
-        self.pad_id = [self.tokenizer.convert_tokens_to_ids("[PAD]")]
-        self.mask_id = [self.tokenizer.convert_tokens_to_ids("[EMASK]")]
-        self.mask_id = [self.tokenizer.convert_tokens_to_ids("[MASK]")]
+
+        self.cls_id = self.tokenizer.convert_tokens_to_ids("<s>")
+        self.sep_id = self.tokenizer.convert_tokens_to_ids("</s>")
+        self.ent_begin_id = self.tokenizer.convert_tokens_to_ids("<ent>")
+        self.ent_end_id = self.tokenizer.convert_tokens_to_ids("</ent>")
+        self.pad_id = self.tokenizer.convert_tokens_to_ids("<pad>")
+        self.mask_id = self.tokenizer.convert_tokens_to_ids("<mask>")
+        self.unk_id = self.tokenizer.convert_tokens_to_ids("<unk>")
+        self.tl_id = self.pad_id
+        self.tr_id = self.mask_id
         self.neg_nums = neg_nums
         self.ignore = ignore
         self.data_dir = data_dir
-        self.triples_dict = self.get_triples_dict(self.data_dir)
-        self.entity_frequency = self.get_entity_frequency(self.data_dir)
+        self.save_dir = save_dir
+
+        self.true_triples_dict = {}
+        self.entity_len_dict = {}
+        # self.triples_dict = self.get_triples_dict(self.data_dir)
+        # self.entity_frequency = self.get_entity_frequency(self.data_dir)
 
     def get_train_examples(self, data_dir):
         """See base class."""
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train_with_path.tsv")), "train", "path_text", data_dir)
+            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train", "text", data_dir)
 
     def get_dev_examples(self, data_dir):
         """See base class."""
@@ -183,42 +154,7 @@ class KGProcessor(DataProcessor):
     def get_test_examples(self, data_dir):
         """See base class."""
         return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "test.tsv")), "test", "text", data_dir)
-
-    def get_path_test_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "test_with_path.tsv")), "test", "path_text", data_dir)
-
-    def get_path_test_triple_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "test_path_triple.tsv")), "test", "path_text", data_dir)
-
-    def get_path_test_path_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "test_path_triple.tsv")), "test", "path_text", data_dir)
-
-    def get_triple_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train", "triple_text", data_dir)
-
-    def get_alias_train_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train", "alias", data_dir)
-
-    def get_alias_dev_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "dev.tsv")), "dev", "alias", data_dir)
-
-    def get_alias_test_examples(self, data_dir):
-        """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "test.tsv")), "test", "alias", data_dir)
+            self._read_tsv(os.path.join(data_dir, "test-N.tsv")), "test", "text", data_dir)
 
     def get_relations(self, data_dir):
         """Gets all labels (relations) in the knowledge graph."""
@@ -244,128 +180,94 @@ class KGProcessor(DataProcessor):
                 entities.append(line.strip())
         return entities
 
-    def get_entity_frequency(self, data_dir):
-        triples = self._read_tsv(os.path.join(data_dir, "train.tsv"))
-        entity_frequency = dict()
-        for triple in triples:
+    # 正例实体dict
+    def get_true_triples_dict(self, all_triples):
+        true_triples_dict = {"forward":{}, "backward":{}}
+        for triple in all_triples:
             head, rel, tail = triple
-            if head not in entity_frequency:
-                entity_frequency[head] = 0
-            if tail not in entity_frequency:
-                entity_frequency[tail] = 0
-            entity_frequency[head] += 1
-            entity_frequency[tail] += 1
-        entity_frequency = sorted(entity_frequency.items(), key=lambda x: x[1], reverse=True)
-        return entity_frequency
+            if head not in true_triples_dict["forward"]:
+                true_triples_dict["forward"][head] = {}
+            if rel not in true_triples_dict["forward"][head]:
+                true_triples_dict["forward"][head][rel] = set()
+            true_triples_dict["forward"][head][rel].add(tail)
 
-    def get_triples_dict(self, data_dir):
-        """Gets triples dict in the knowledge graph."""
-        triples_dict = dict()
-        triples = self._read_tsv(os.path.join(data_dir, "train.tsv"))
+            if tail not in true_triples_dict["backward"]:
+                true_triples_dict["backward"][tail] = {}
+            if rel not in true_triples_dict["backward"][tail]:
+                true_triples_dict["backward"][tail][rel] = set()
+            true_triples_dict["backward"][tail][rel].add(head)
+        self.true_triples_dict = true_triples_dict
 
-        for triple in triples:
-            head, rel, tail = triple
+    # 实体长度dict
+    def get_entity_len_dict(self, head_entities, tail_entities, ent2alias):
+        entity_len_dict = {"head":{}, "tail":{}}
+        for head, tail in zip(head_entities, tail_entities):
+            entity = head
+            entity_name = ent2alias[entity]
+            entity_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(entity_name))
+            entity_len = len(entity_tokens)
+            if entity_len not in entity_len_dict["head"]:
+                entity_len_dict["head"][entity_len] = {}
+            if entity not in entity_len_dict["head"][entity_len]:
+                entity_len_dict["head"][entity_len][entity] = 0
+            entity_len_dict["head"][entity_len][entity] += 1
 
-            if head not in triples_dict:
-                triples_dict[head] = dict()
-                triples_dict[head]['normal'] = dict()
-            elif 'normal' not in triples_dict[head]:
-                triples_dict[head]['normal'] = dict()
-            triples_dict[head]['normal'][rel] = tail
+            entity = tail
+            entity_name = ent2alias[entity]
+            entity_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(entity_name))
+            entity_len = len(entity_tokens)
+            if entity_len not in entity_len_dict["tail"]:
+                entity_len_dict["tail"][entity_len] = {}
+            if entity not in entity_len_dict["tail"][entity_len]:
+                entity_len_dict["tail"][entity_len][entity] = 0
+            entity_len_dict["tail"][entity_len][entity] += 1
 
-            if tail not in triples_dict:
-                triples_dict[tail] = dict()
-                triples_dict[tail]['invert'] = dict()
-            elif 'invert' not in triples_dict[tail]:
-                triples_dict[tail]['invert'] = dict()
-            triples_dict[tail]['invert'][rel] = head
+        for i in range(self.max_entity_len + 1):
+            if i == 0:
+                continue
+            if i in entity_len_dict['head']:
+                head_sorted_list = sorted(entity_len_dict['head'][i].items(), key=lambda x: x[1], reverse=True)
+                entity_len_dict['head'][i] = head_sorted_list
+            if i in entity_len_dict['tail']:
+                tail_sorted_list = sorted(entity_len_dict['tail'][i].items(), key=lambda x: x[1], reverse=True)
+                entity_len_dict['tail'][i] = tail_sorted_list
+        self.entity_len_dict = entity_len_dict
 
-            if rel not in triples_dict:
-                triples_dict[rel] = dict()
-                triples_dict[rel]['head'] = set()
-                triples_dict[rel]['tail'] = set()
-            triples_dict[rel]['head'].add(head)
-            triples_dict[rel]['tail'].add(tail)
-        return triples_dict
-
-    def get_negatives(self, triple, corrupt_type):
+    def get_negatives(self, triple, entity_ids, text_type, neg_nums):
         head, rel, tail = triple
-        candi_dict = dict()
-        candi_dict['from_entity'] = dict()
-        candi_dict['from_relation'] = dict()
-        negatives = []
-        if corrupt_type == 'tail':
-            true_entity = tail
-            try:
-                tail_set = self.triples_dict[head]['normal']
-            except:
-                tail_set = {}
-            for crel, ctail in tail_set.items():
-                if rel == crel or tail == ctail:
-                    continue
-                if ctail not in candi_dict['from_entity']:
-                    candi_dict['from_entity'][ctail] = 0
-                candi_dict['from_entity'][ctail] += 1
-            try:
-                tail_set = self.triples_dict[rel]['tail']
-            except:
-                tail_set = set()
-            for ctail in tail_set:
-                if tail == ctail:
-                    continue
-                if ctail not in candi_dict['from_relation']:
-                    candi_dict['from_relation'][ctail] = 0
-                candi_dict['from_relation'][ctail] += 1
+        if text_type == "head":
+            entity = head
+            entity_type = "forward"
+            entity_pos = "tail"
         else:
-            true_entity = head
-            try:
-                head_set = self.triples_dict[tail]['invert']
-            except:
-                head_set = {}
-            for crel, chead in head_set.items():
-                if rel == crel or head == chead:
-                    continue
-                if chead not in candi_dict['from_entity']:
-                    candi_dict['from_entity'][chead] = 0
-                candi_dict['from_entity'][chead] += 1
-            try:
-                head_set = self.triples_dict[rel]['head']
-            except:
-                head_set = set()
-            for chead in head_set:
-                if head == chead:
-                    continue
-                if chead not in candi_dict['from_relation']:
-                    candi_dict['from_relation'][chead] = 0
-                candi_dict['from_relation'][chead] += 1
+            entity = tail
+            entity_type = "backward"
+            entity_pos = "head"
 
-        from_entity = sorted(candi_dict['from_entity'].items(), key=lambda x: x[1], reverse=True)
-        from_relation = sorted(candi_dict['from_relation'].items(), key=lambda x: x[1], reverse=True)
+        entity_len = len(entity_ids)
 
-        if len(from_entity) < self.neg_nums:
-            for item in self.entity_frequency:
-                candi_entity = item[0]
-                if true_entity == candi_entity:
-                    continue
-                from_entity.append([candi_entity])
-                if len(from_entity) >= self.neg_nums:
-                    break
-        if len(from_relation) < self.neg_nums:
-            for item in self.entity_frequency:
-                candi_entity = item[0]
-                if true_entity == candi_entity:
-                    continue
-                from_relation.append([candi_entity])
-                if len(from_relation) >= self.neg_nums:
-                    break
-        for i in range(self.neg_nums):
-            negatives.append(from_entity[i][0])
-            negatives.append(from_relation[i][0])
+        negatives = []
+        if text_type == "head":
+            entity_type = "forward"
+        else:
+            entity_type = "backward"
+
+        # 取 token 长度一样的实体集
+        entity_list = self.entity_len_dict[entity_pos][entity_len]
+        for centity_cnt in entity_list:
+            centity, cnt = centity_cnt
+            if entity in self.true_triples_dict[entity_type]:
+                if rel in self.true_triples_dict[entity_type][entity]:
+                    # 过滤true实体
+                    if centity not in self.true_triples_dict[entity_type][entity][rel]:
+                        negatives.append(centity)
+                        if len(negatives) == neg_nums:
+                            break
         return negatives
 
     def _create_examples(self, lines, set_type, data_type, data_dir):
         """Creates examples for the training and dev sets."""
-        features_file = os.path.join(data_dir, set_type + "_" + data_type + "_features.npy")
+        features_file = os.path.join(self.save_dir, set_type + "_" + data_type + "_features.npy")
         features_path = Path(features_file)
         if self.ignore:
             if features_path.exists():
@@ -387,22 +289,36 @@ class KGProcessor(DataProcessor):
                         ent2alias[temp[0]] = temp[1][:end]
                         ent2text[temp[0]] = temp[1][end:]
 
+        max_desc_len = 0.0
         if data_dir.find("FB15") != -1:
             ent2text = {}
             with open(os.path.join(data_dir, "entity2textlong.txt"), 'r', encoding='utf-8') as f:
                 ent_lines = f.readlines()
                 for line in ent_lines:
                     temp = line.strip().split('\t')
-                    # first_sent_end_position = temp[1].find(".")
-                    ent2text[temp[0]] = temp[1]  # [:first_sent_end_position + 1]
-        entities = list(ent2text.keys())
+                    first_sent_end_position = temp[1].find(".")
+                    ent2text[temp[0]] = temp[1][:first_sent_end_position + 1]  # [:first_sent_end_position + 1]
+                    token_len = len(self.tokenizer.tokenize(temp[1][:first_sent_end_position + 1]))
+                    if token_len > max_desc_len:
+                        max_desc_len = token_len
+        # print(max_desc_len)
 
-        rel2text = {}
-        with open(os.path.join(data_dir, "relation2text.txt"), 'r', encoding='utf-8') as f:
-            rel_lines = f.readlines()
-            for line in rel_lines:
-                temp = line.strip().split('\t')
-                rel2text[temp[0]] = temp[1]
+        rel_file = open(os.path.join(data_dir, "relation2template.json"))
+        rel2text = json.load(rel_file)
+
+        all_triples = self._read_tsv(os.path.join(data_dir, "all.tsv"))
+        head_entities = []
+        for triple in all_triples:
+            head, rel, tail = triple
+            head_entities.append(head)
+        tail_entities = []
+        for triple in all_triples:
+            head, rel, tail = triple
+            tail_entities.append(tail)
+        self.get_true_triples_dict(all_triples)
+        self.get_entity_len_dict(head_entities, tail_entities, ent2alias)
+
+
         # relations = list(rel2text.keys())
         # lines_str_set = set(['\t'.join(line) for line in lines])
 
@@ -425,12 +341,16 @@ class KGProcessor(DataProcessor):
         # print(max_rel_len1)
         # print(max_text_len)
         # print("###########")
+        # x = input()
 
+        empty_entity = set()
         examples, mlm_features = [], []
         ori_max_rel_len = self.max_rel_len
         path_max_rel_len = self.max_rel_len * 2 + self.max_entity_len
         if 'alias' in data_type:
             ent2text = ent2alias
+
+        test_file = open(os.path.join(data_dir, "demo_test.txt"), 'w', encoding='utf-8')
         for (index, line) in tqdm(enumerate(lines)):
             if index % 10000 == 0:
                 logger.info("Writing example %d of %d" % (index, len(lines)))
@@ -441,11 +361,13 @@ class KGProcessor(DataProcessor):
                 text_type_list = ['head', 'tail']
             for text_type in text_type_list:
                 negatives = []
+                pos_neg_seq = []
+                margin_labels = []
                 if item_nums == 3:
                     is_triple = True
                     head, rel, tail = line
                     self.max_rel_len = ori_max_rel_len
-                    max_text_len = self.max_len - 7 - self.max_entity_len * 2 - self.max_rel_len
+                    max_text_len = self.max_len - 5 - self.max_entity_len * 2 - self.max_rel_len
                     relation_text = rel2text[rel]
                     head_alias = ent2alias[head]
                     tail_alias = ent2alias[tail]
@@ -458,349 +380,193 @@ class KGProcessor(DataProcessor):
                     head_alias = ent2alias[head]
                     tail_alias = ent2alias[tail]
 
+                if tail in ent2text:
+                    tail_text = ent2text[tail]
+                else:
+                    if tail not in empty_entity:
+                        print("Cannot find description for entity {}!".format(tail))
+                        empty_entity.add(tail)
+                    tail_text = ent2alias[tail]
+                if head in ent2text:
+                    head_text = ent2text[head]
+                else:
+                    if head not in empty_entity:
+                        print("Cannot find description for entity {}!".format(head))
+                        empty_entity.add(head)
+                    head_text = ent2alias[head]
+
+                # 替换为关系模板，构造三元组文本
+                this_template = relation_text.replace('[X]', '::;;##').replace('[Y]', '::;;##')
+                prompts = this_template.split('::;;##')
+                prompts = [x.strip() for x in prompts]
+                assert(len(prompts) == 3)
+                idx_x = relation_text.find('[X]')
+                idx_y = relation_text.find('[Y]')
+                if idx_x < idx_y:
+                    final_list = [prompts[0], "<s>", head_alias.strip(), "</s>", prompts[1], "<pad>", tail_alias.strip(), "<mask>", prompts[2]]
+                else:
+                    final_list = [prompts[0], "<pad>", tail_alias.strip(), "<mask>", prompts[1], "<s>", head_alias.strip(), "</s>", prompts[2]]
+
+                triple_sent = ''.join(final_list).strip()
+
+                triple_ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(triple_sent))
+                ha_pos, hae_pos = triple_ids.index(self.cls_id), triple_ids.index(self.sep_id)
+                triple_ids[ha_pos] = self.ent_begin_id
+                triple_ids[hae_pos] = self.ent_end_id
+
+                ta_pos, tae_pos = triple_ids.index(self.tl_id), triple_ids.index(self.tr_id)
+                triple_ids[ta_pos] = self.ent_begin_id
+                triple_ids[tae_pos] = self.ent_end_id
+
+                ha_ids = triple_ids[ha_pos + 1: hae_pos]
+                # print(self.tokenizer.convert_ids_to_tokens(ha_ids))
+                # print(head_alias)
+                ta_ids = triple_ids[ta_pos + 1: tae_pos]
+                # print(self.tokenizer.convert_ids_to_tokens(ta_ids))
+                # print(tail_alias)
+                ht_ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head_text))
+                # ta_ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail_alias))
+                tt_ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail_text))
+
                 if text_type == 'head':
-                    mask_type = 'tail'
-                    relation_text = relation_text + " Forward"
-                    if head in ent2text:
-                        head_text = ent2text[head]
-                    else:
-                        print("Cannot find description for entity {}!".format(head))
-                        head_text = ent2alias[head]
+                    mask_pos = ta_pos + 1
+                    mask_end_pos = tae_pos
+                    mask_ids = ta_ids
+                    text_ids = ht_ids
+                    mask_type = "tail"
                 else:
-                    mask_type = 'head'
-                    relation_text = relation_text + " Backward"
-                    if tail in ent2text:
-                        head_text = ent2text[tail]
-                    else:
-                        print("Cannot find description for entity {}!".format(head))
-                        head_text = ent2alias[tail]
-                    temp_alias = head_alias
-                    head_alias = tail_alias
-                    tail_alias = temp_alias
-                    # neg_entities = self.get_negatives(line, mask_type)
-                rel_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(relation_text))
-                masked_rel_tokens = self.mask_id * len(rel_tokens)
-                ha_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head_alias))
-                ta_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail_alias))
-                masked_ta_tokens = self.mask_id * len(ta_tokens)
-                ht_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head_text))
-                if len(ht_tokens) > self.max_len - 7 - len(ha_tokens) - self.max_entity_len- len(rel_tokens):
-                    _truncate_ids(ht_tokens, len(ht_tokens), self.max_len - 7 - len(ha_tokens) - self.max_entity_len - len(rel_tokens))
+                    mask_pos = ha_pos + 1
+                    mask_end_pos = hae_pos
+                    mask_ids = ha_ids
+                    text_ids = tt_ids
+                    mask_type = "head"
+
+                negatives = self.get_negatives(line, mask_ids, text_type, self.neg_nums)
+                assert len(negatives) == self.neg_nums
+                for i in range(len(mask_ids)):
+                    triple_ids[mask_pos + i] = self.mask_id
+
+                if len(text_ids) > max_text_len:
+                    _truncate_ids(text_ids, max_text_len)
                 if set_type == 'train' or set_type == 'dev':
-                    ht_tokens, mlm_label_ids = mask_tokens(vocab_size=len(self.tokenizer.get_vocab()),
+                    # do mlm
+                    text_ids, mlm_label_ids = do_mask_ids(vocab_size=len(self.tokenizer.get_vocab()),
                                                            tokenizer=self.tokenizer,
-                                                           inputs=ht_tokens,
-                                                           mlm_prob=0.15)
+                                                           inputs=text_ids,
+                                                           mlm_prob=0.2, mask_id=self.mask_id)
                 else:
-                    mlm_label_ids = ht_tokens
-                temp = self.cls_id + self.ent_begin_id + ha_tokens
-                mlm_label_ids = [0] * len(temp) + mlm_label_ids
-                _truncate_ids(mlm_label_ids, len(mlm_label_ids), self.max_len)
+                    mlm_label_ids = text_ids
 
-                temp = temp + ht_tokens + self.ent_end_id + \
-                       self.rel_begin_id + rel_tokens + self.rel_end_id + self.ent_begin_id
-                mem_label_ids = [0] * len(temp) + ta_tokens
-                _truncate_ids(mem_label_ids, len(mem_label_ids), self.max_len)
-                mem_label_idx = [len(temp), len(temp) + len(ta_tokens)]
-                all_tokens = temp + masked_ta_tokens + self.ent_end_id
-                _truncate_ids(all_tokens, len(all_tokens), self.max_len)
+                # old template
+                input_seq = [self.cls_id] + text_ids
+                mlm_label_ids = [self.pad_id] + mlm_label_ids
+                _truncate_ids(mlm_label_ids, self.max_len)
 
-                temp = self.cls_id + self.ent_begin_id + ha_tokens + ht_tokens + self.ent_end_id + self.rel_begin_id
-                mrm_label_ids = [0] * len(temp) + rel_tokens
-                _truncate_ids(mrm_label_ids, len(mrm_label_ids), self.max_len)
-                mrm_all_tokens = temp + masked_rel_tokens + self.rel_end_id + \
-                                 self.ent_begin_id + ta_tokens + self.ent_end_id
-                _truncate_ids(mrm_all_tokens, len(mrm_all_tokens), self.max_len)
+                mem_label_ids = [self.pad_id] * len(input_seq) + [self.pad_id] * mask_pos + mask_ids
+                _truncate_ids(mem_label_ids, self.max_len)
+                mem_label_idx = [len(input_seq) + mask_pos, len(input_seq) + mask_pos + len(mask_ids)]
 
-                head_len, tail_len = len(ha_tokens + ht_tokens), len(ta_tokens)
-                all_len, rel_len = len(all_tokens), len(rel_tokens)
+                pos_triple_ids = triple_ids[:mask_pos] + mask_ids + triple_ids[mask_end_pos:]
+                pos_seq = input_seq + pos_triple_ids
+                _truncate_ids(pos_seq, self.max_len)
+                assert len(pos_seq) == self.max_len
+                pos_neg_seq.append(pos_seq)
+                margin_labels += [1] * len(mask_ids)
+                # corrupt head and tail
+                for neg_entity in negatives:
+                    neg_ids = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(ent2alias[neg_entity]))
+                    assert len(neg_ids) == len(mask_ids)
+                    neg_triple_ids = triple_ids[:mask_pos] + neg_ids + triple_ids[mask_end_pos:]
+                    assert len(neg_triple_ids) == len(triple_ids)
+                    neg_seq = input_seq + neg_triple_ids
+                    _truncate_ids(neg_seq, self.max_len)
+                    pos_neg_seq.append(neg_seq)
+                    margin_labels += [0] * len(neg_ids)
 
-                # segment id
-                segment_ids = [0] * (head_len + 3) + [1] * (rel_len + 2) + [0] * (tail_len + 2)
-                _truncate_ids(segment_ids, len(segment_ids), self.max_len)
+                _truncate_ids(margin_labels, self.max_len)
 
-                # position id
-                position_ids = []
-                for i in range(all_len):
-                    position_ids += [i]
+                input_seq = input_seq + triple_ids
+                _truncate_ids(input_seq, self.max_len)
 
+                # # new template
+                # if text_type == 'head':
+                #     input_seq = [self.cls_id] + text_ids
+                #     mlm_label_ids = [self.pad_id] + mlm_label_ids
+                #     _truncate_ids(mlm_label_ids, self.max_len)
+
+                #     mem_label_ids = [self.pad_id] * len(input_seq) + mem_label_ids
+                #     _truncate_ids(mem_label_ids, self.max_len)
+                #     mem_label_idx = [len(input_seq) + mask_pos, len(input_seq) + mask_pos + len(mask_ids)]
+
+                #     input_seq = input_seq + triple_ids
+                #     _truncate_ids(input_seq, self.max_len)
+                # else:
+                #     input_seq = [self.cls_id] + triple_ids
+                #     mlm_label_ids = [self.pad_id] * len(input_seq) + mlm_label_ids
+                #     _truncate_ids(mlm_label_ids, self.max_len)
+
+                #     mem_label_ids = [self.pad_id] + mem_label_ids
+                #     _truncate_ids(mem_label_ids, self.max_len)
+                #     mem_label_idx = [1 + mask_pos, 1 + mask_pos + len(mask_ids)]
+
+                #     input_seq = input_seq + text_ids
+                #     _truncate_ids(input_seq, self.max_len)
+
+                all_len = len(input_seq)
                 # input mask
                 input_mask = []
                 for i in range(all_len):
-                    input_mask += [1 if all_tokens[i] != 0 else 0]
+                    input_mask += [1 if input_seq[i] != self.pad_id else 0]
 
-                all_tokens = np.array(all_tokens)
-                mrm_all_tokens = np.array(mrm_all_tokens)
-                segment_ids = np.array(segment_ids)
-                position_ids = np.array(position_ids)
+                all_tokens = np.array(input_seq)
                 input_mask = np.array(input_mask)
                 mlm_label_ids = np.array(mlm_label_ids)
                 mem_label_ids = np.array(mem_label_ids)
-                mrm_label_ids = np.array(mrm_label_ids)
-
                 assert len(all_tokens) == self.max_len
-                assert len(mrm_all_tokens) == self.max_len
-                assert len(segment_ids) == self.max_len
-                assert len(position_ids) == self.max_len
                 assert len(input_mask) == self.max_len
                 assert len(mlm_label_ids) == self.max_len
                 assert len(mem_label_ids) == self.max_len
-                assert len(mrm_label_ids) == self.max_len
-
+                assert len(pos_neg_seq) == (self.neg_nums + 1)
                 if index == 0:
+                    test_file.write(triple_sent + '\n')
+                    test_file.write("############ Triple input data#############" + '\n')
+                    test_file.write("input tokens:{}".format(self.tokenizer.convert_ids_to_tokens(all_tokens)) + '\n')
+                    test_file.write("input ids:{}".format(all_tokens) + '\n')
+                    test_file.write("input masks:{}".format(input_mask) + '\n')
+                    test_file.write("mlm label:{}".format(mlm_label_ids) + '\n')
+                    test_file.write("mem label:{}".format(mem_label_ids) + '\n')
+                    test_file.write("mem label idx:{}".format(mem_label_idx) + '\n')
+                    test_file.flush()
+                    print(triple_sent)
                     print("############ Triple input data#############")
                     print("input tokens:{}".format(self.tokenizer.convert_ids_to_tokens(all_tokens)))
                     print("input ids:{}".format(all_tokens))
                     print("input masks:{}".format(input_mask))
-                    print("segment ids:{}".format(segment_ids))
-                    print("position ids:{}".format(position_ids))
                     print("mlm label:{}".format(mlm_label_ids))
                     print("mem label:{}".format(mem_label_ids))
                     print("mem label idx:{}".format(mem_label_idx))
-                    print("mrm input ids:{}".format(mrm_all_tokens))
-                    print("mrm label ids:{}".format(mrm_label_ids))
 
                 mlm_feature = MLERMFeatures(
                     src_ids=all_tokens,
-                    segment_ids=segment_ids,
-                    position_ids=position_ids,
                     input_mask=input_mask,
                     mlm_label_ids=mlm_label_ids,
                     mem_label_ids=mem_label_ids,
                     mem_label_idx=mem_label_idx,
-                    r_src_ids=mrm_all_tokens,
-                    mrm_label_ids=mrm_label_ids,
+                    pos_neg_seq=pos_neg_seq,
                     mask_type=mask_type)
                 mlm_features.append(mlm_feature)
 
-                # elif item_nums == 5:
-                #     max_text_len = self.max_len - 11 - self.max_entity_len * 2 - self.max_rel_len * 2
-                #     relation_1_text = rel2text[line[1]]
-                #     relation_2_text = rel2text[line[3]]
-                #     rel_1_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(relation_1_text))
-                #     rel_2_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(relation_2_text))
-                #     if text_type == 'head':
-                #         mask_type = 'tail'
-                #         if line[0] in ent2text:
-                #             head = ent2text[line[0]]
-                #         else:
-                #             print("Cannot find description for entity {}!".format(ent2alias[line[0]]))
-                #             head = ent2alias[line[0]]
-                #         triple = (line[0], line[2], line[4])
-                #         neg_entities = self.get_negatives(triple, mask_type)
-                #         head_alias, mid, tail = ent2alias[line[0]], ent2alias[line[2]], ent2alias[line[4]]
-                #         head_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head))
-                #         # head_alias_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head_alias))
-                #         mid_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(mid))
-                #         tail_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail))
-                #         head_tokens, mlm_label_ids = mask_tokens(vocab_size=len(self.tokenizer.get_vocab()),
-                #                                                  tokenizer=self.tokenizer,
-                #                                                  inputs=head_tokens,
-                #                                                  mlm_prob=0.15)
-                #         # mlm label ids
-                #         _truncate_ids(mlm_label_ids, len(mlm_label_ids), max_text_len)
-                #         mlm_label_ids = [0] * 2 + mlm_label_ids + [0] * (self.max_len - 2 - max_text_len)
-                #         # mem label ids
-                #         mem_label_ids = [0] * (self.max_len - self.max_entity_len - 1) + tail_tokens
-                #         _truncate_ids(mem_label_ids, len(mem_label_ids), self.max_len)
-                #         neg_mem_label_ids = [0] * (self.max_len - self.max_entity_len - 1) + mid_tokens
-                #         _truncate_ids(neg_mem_label_ids, len(neg_mem_label_ids), self.max_len)
-                #         negatives.append(neg_mem_label_ids)
-                #         for neg_entity in neg_entities:
-                #             neg_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(ent2alias[neg_entity]))
-                #             neg_mem_label_ids = [0] * (self.max_len - self.max_entity_len - 1) + neg_tokens
-                #             _truncate_ids(neg_mem_label_ids, len(neg_mem_label_ids), self.max_len)
-                #             negatives.append(neg_mem_label_ids)
-                #         mem_label_idx = [self.max_len - 1 - self.max_entity_len,
-                #                          self.max_len - 1 - self.max_entity_len + len(tail_tokens)]
-                #         # mem tokens
-                #         tail_tokens = self.mask_id * len(tail_tokens)
-                #
-                #         _truncate_pad_sequence((head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens, tail_tokens),
-                #                                text_type, self.max_entity_len, self.max_rel_len, max_text_len,
-                #                                self.max_len - 11)
-                #         head_tokens = self.cls_id + self.ent_begin_id + head_tokens + self.ent_end_id
-                #         tail_tokens = self.ent_begin_id + tail_tokens + self.ent_end_id
-                #         rel_1_tokens = self.rel_begin_id + rel_1_tokens + self.rel_end_id
-                #         mid_tokens = self.ent_begin_id + mid_tokens + self.ent_end_id
-                #         rel_2_tokens = self.rel_begin_id + rel_2_tokens + self.rel_end_id
-                #         all_tokens = head_tokens + rel_1_tokens + mid_tokens + rel_2_tokens + tail_tokens
-                #         # input_mask = (text_input_mask + [1] * (len(all_tokens) - len(head_tokens)))
-                #
-                #     elif text_type == 'mid':
-                #         if line[2] in ent2text:
-                #             mid = ent2text[line[2]]
-                #         else:
-                #             print("Cannot find description for entity {}!".format(ent2alias[line[2]]))
-                #             mid = ent2alias[line[2]]
-                #         triple = (line[0], line[2], line[4])
-                #         head, mid_alias, tail = ent2alias[line[0]], ent2alias[line[2]],ent2alias[line[4]]
-                #         head_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head))
-                #         mid_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(mid))
-                #         # mid_alias_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(mid_alias))
-                #         tail_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail))
-                #         mid_tokens, mlm_label_ids = mask_tokens(vocab_size=len(self.tokenizer.get_vocab()),
-                #                                                 tokenizer=self.tokenizer,
-                #                                                 inputs=mid_tokens,
-                #                                                 mlm_prob=0.15)
-                #         _truncate_ids(mlm_label_ids, len(mlm_label_ids), max_text_len)
-                #         mlm_label_ids = [0] * (self.max_entity_len + 6 + self.max_rel_len) + mlm_label_ids + [0] * (
-                #                 self.max_entity_len + self.max_rel_len + 5)
-                #         rnd = random.random()
-                #         if rnd <= 0.5:
-                #             mask_type = 'tail'
-                #             neg_entities = self.get_negatives(triple, mask_type)
-                #             mem_label_ids = [0] * (self.max_len - self.max_entity_len - 1) + tail_tokens
-                #             _truncate_ids(mem_label_ids, len(mem_label_ids), self.max_len)
-                #             neg_mem_label_ids = [0] * (self.max_len - self.max_entity_len - 1) + head_tokens
-                #             _truncate_ids(neg_mem_label_ids, len(neg_mem_label_ids), self.max_len)
-                #             negatives.append(neg_mem_label_ids)
-                #             for neg_entity in neg_entities:
-                #                 neg_tokens = self.tokenizer.convert_tokens_to_ids(
-                #                     self.tokenizer.tokenize(ent2alias[neg_entity]))
-                #                 neg_mem_label_ids = [0] * (self.max_len - self.max_entity_len - 1) + neg_tokens
-                #                 _truncate_ids(neg_mem_label_ids, len(neg_mem_label_ids), self.max_len)
-                #                 negatives.append(neg_mem_label_ids)
-                #             mem_label_idx = [self.max_len - 1 - self.max_entity_len,
-                #                              self.max_len - 1 - self.max_entity_len + len(tail_tokens)]
-                #             tail_tokens = self.mask_id * len(tail_tokens)
-                #         else:
-                #             mask_type = 'head'
-                #             neg_entities = self.get_negatives(triple, mask_type)
-                #             mem_label_ids = [0] * 2 + head_tokens
-                #             _truncate_ids(mem_label_ids, len(mem_label_ids), self.max_len)
-                #             neg_mem_label_ids = [0] * 2 + tail_tokens
-                #             _truncate_ids(neg_mem_label_ids, len(neg_mem_label_ids), self.max_len)
-                #             negatives.append(neg_mem_label_ids)
-                #             for neg_entity in neg_entities:
-                #                 neg_tokens = self.tokenizer.convert_tokens_to_ids(
-                #                     self.tokenizer.tokenize(ent2alias[neg_entity]))
-                #                 neg_mem_label_ids = [0] * 2 + neg_tokens
-                #                 _truncate_ids(neg_mem_label_ids, len(neg_mem_label_ids), self.max_len)
-                #                 negatives.append(neg_mem_label_ids)
-                #             mem_label_idx = [2, len(head_tokens) + 2]
-                #             head_tokens = self.mask_id * len(head_tokens)
-                #         _truncate_pad_sequence((head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens, tail_tokens),
-                #                                text_type, self.max_entity_len, self.max_rel_len, max_text_len,
-                #                                self.max_len - 11)
-                #         head_tokens = self.cls_id + self.ent_begin_id + head_tokens + self.ent_end_id
-                #         tail_tokens = self.ent_begin_id + tail_tokens + self.ent_end_id
-                #         rel_1_tokens = self.rel_begin_id + rel_1_tokens + self.rel_end_id
-                #         mid_tokens = self.ent_begin_id + mid_tokens + self.ent_end_id
-                #         rel_2_tokens = self.rel_begin_id + rel_2_tokens + self.rel_end_id
-                #         all_tokens = head_tokens + rel_1_tokens + mid_tokens + rel_2_tokens + tail_tokens
-                #
-                #         # input_mask = ([1] * (head_len + rel_1_len) + text_input_mask + [1] * (rel_2_len + tail_len))
-                #     else:
-                #         mask_type = 'head'
-                #         if line[4] in ent2text:
-                #             tail = ent2text[line[4]]
-                #         else:
-                #             print("Cannot find description for entity {}!".format(ent2alias[line[4]]))
-                #             tail = ent2alias[line[4]]
-                #         triple = (line[0], line[2], line[4])
-                #         neg_entities = self.get_negatives(triple, mask_type)
-                #         head, mid, tail_alias = ent2alias[line[0]], ent2alias[line[2]], ent2alias[line[4]]
-                #         head_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(head))
-                #         mid_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(mid))
-                #         tail_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail))
-                #         # tail_alias_tokens = self.tokenizer.convert_tokens_to_ids(self.tokenizer.tokenize(tail_alias))
-                #         tail_tokens, mlm_label_ids = mask_tokens(vocab_size=len(self.tokenizer.get_vocab()),
-                #                                                  tokenizer=self.tokenizer,
-                #                                                  inputs=tail_tokens,
-                #                                                  mlm_prob=0.15)
-                #         _truncate_ids(mlm_label_ids, len(mlm_label_ids), max_text_len)
-                #         mlm_label_ids = [0] * (self.max_len - max_text_len - 1) + mlm_label_ids + [0]
-                #
-                #         mem_label_ids = [0] * 2 + head_tokens
-                #         _truncate_ids(mem_label_ids, len(mem_label_ids), self.max_len)
-                #         neg_mem_label_ids = [0] * 2 + mid_tokens
-                #         _truncate_ids(neg_mem_label_ids, len(neg_mem_label_ids), self.max_len)
-                #         negatives.append(neg_mem_label_ids)
-                #         for neg_entity in neg_entities:
-                #             neg_tokens = self.tokenizer.convert_tokens_to_ids(
-                #                 self.tokenizer.tokenize(ent2alias[neg_entity]))
-                #             neg_mem_label_ids = [0] * 2 + neg_tokens
-                #             _truncate_ids(neg_mem_label_ids, len(neg_mem_label_ids), self.max_len)
-                #             negatives.append(neg_mem_label_ids)
-                #         mem_label_idx = [2, len(head_tokens) + 2]
-                #         head_tokens = self.mask_id * len(head_tokens)
-                #
-                #         _truncate_pad_sequence((head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens, tail_tokens),
-                #                                text_type, self.max_entity_len, self.max_rel_len, max_text_len,
-                #                                self.max_len - 11)
-                #
-                #         tail_tokens = self.ent_begin_id + tail_tokens + self.ent_end_id
-                #         head_tokens = self.cls_id + self.ent_begin_id + head_tokens + self.ent_end_id
-                #         rel_1_tokens = self.rel_begin_id + rel_1_tokens + self.rel_end_id
-                #         mid_tokens = self.ent_begin_id + mid_tokens + self.ent_end_id
-                #         rel_2_tokens = self.rel_begin_id + rel_2_tokens + self.rel_end_id
-                #         all_tokens = head_tokens + rel_1_tokens + mid_tokens + rel_2_tokens + tail_tokens
-                #         # input_mask = ([1] * (len(all_tokens) - len(tail_tokens)) + text_input_mask)
-                #
-                #     all_len, head_len, rel_1_len, mid_len, rel_2_len, tail_len = \
-                #         len(all_tokens), len(head_tokens), len(rel_1_tokens), len(mid_tokens), len(
-                #             rel_2_tokens), len(
-                #             tail_tokens)
-                #
-                #     # segment id
-                #     segment_ids = [0] * head_len + [1] * rel_1_len + [0] * mid_len + [1] * rel_2_len + [
-                #         0] * tail_len
-                #
-                #     # position id
-                #     position_ids = []
-                #     for i in range(all_len):
-                #         position_ids += [i]
-                #
-                #     # input mask
-                #     input_mask = []
-                #     for i in range(len(all_tokens)):
-                #         input_mask += [1 if all_tokens[i] != 0 else 0]
-                #
-                #     all_tokens = np.array(all_tokens)
-                #     segment_ids = np.array(segment_ids)
-                #     position_ids = np.array(position_ids)
-                #     input_mask = np.array(input_mask)
-                #     mlm_label_ids = np.array(mlm_label_ids)
-                #     mem_label_ids = np.array(mem_label_ids)
-                #     assert len(all_tokens) == self.max_len
-                #     assert len(segment_ids) == self.max_len
-                #     assert len(position_ids) == self.max_len
-                #     assert len(input_mask) == self.max_len
-                #     assert len(mlm_label_ids) == self.max_len
-                #     assert len(mem_label_ids) == self.max_len
-                #     assert len(negatives) == 1 + 2 * self.neg_nums
-                #     assert len(negatives[0]) == self.max_len
-                #     assert len(mem_label_idx) == 2
-                #     # assert len(mem_mask_pos) == len(mem_label_ids)
-                #     if index == 0:
-                #         print("############ Path input data#############")
-                #         print("input tokens:{}".format(self.tokenizer.convert_ids_to_tokens(all_tokens)))
-                #         print("input ids:{}".format(all_tokens))
-                #         print("input masks:{}".format(input_mask))
-                #         print("segment ids:{}".format(segment_ids))
-                #         print("position ids:{}".format(position_ids))
-                #         print("mlm label:{}".format(mlm_label_ids))
-                #         print("mem label:{}".format(mem_label_ids))
-                #         print("mem label idx:{}".format(mem_label_idx))
-                #     mlm_feature = MLMFeaturesWithNeg(
-                #         src_ids=all_tokens,
-                #         segment_ids=segment_ids,
-                #         position_ids=position_ids,
-                #         input_mask=input_mask,
-                #         mlm_label_ids=mlm_label_ids,
-                #         mem_label_ids=mem_label_ids,
-                #         mem_label_idx=mem_label_idx,
-                #         negatives=negatives,
-                #         mask_type=mask_type)
-                #     mlm_features.append(mlm_feature)
         np.save(features_file, np.array(mlm_features))
+        empty_file = open(os.path.join(data_dir, set_type + "_" + data_type + "_empty_entities.txt"), 'w', encoding='utf-8')
+        for entity in empty_entity:
+            empty_file.write(entity + "\n")
         return mlm_features
 
 
-def _truncate_ids(input_ids, ids_len, max_ids_len):
+def _truncate_ids(input_ids, max_ids_len):
+    ids_len = len(input_ids)
     if ids_len <= max_ids_len:
-        input_ids.extend((max_ids_len - ids_len) * [0])
+        input_ids.extend((max_ids_len - ids_len) * [1])
     else:
         while True:
             input_ids.pop()
@@ -808,103 +574,25 @@ def _truncate_ids(input_ids, ids_len, max_ids_len):
                 break
 
 
-def _truncate_entity(input_tokens, entity_len, max_entity_len):
-    if entity_len <= max_entity_len:
-        input_tokens.extend((max_entity_len - entity_len) * [0])
-    else:
-        while True:
-            input_tokens.pop()
-            if len(input_tokens) <= max_entity_len:
-                break
-
-
-def _truncate_relation(input_tokens, rel_len, max_rel_len):
-    if rel_len <= max_rel_len:
-        input_tokens.extend((max_rel_len - rel_len) * [0])
-    else:
-        while True:
-            input_tokens.pop()
-            if len(input_tokens) <= max_rel_len:
-                break
-
-
-def _truncate_text(input_tokens, text_len, max_text_len):
-    if text_len <= max_text_len:
-        input_tokens.extend((max_text_len - text_len) * [0])
-    else:
-        while True:
-            input_tokens.pop()
-            if len(input_tokens) <= max_text_len:
-                break
-
-
-def _truncate_pad_sequence(input_tokens, text_type, max_entity_len, max_rel_len, max_text_len, max_len):
-    if len(input_tokens) == 4:
-        head_tokens, tail_tokens, rel_tokens, text_tokens = input_tokens
-        head_len, rel_len, tail_len, text_len = len(head_tokens), len(rel_tokens), len(tail_tokens), len(text_tokens)
-
-        _truncate_relation(rel_tokens, rel_len, max_rel_len)
-        _truncate_entity(head_tokens, head_len, max_entity_len)
-        _truncate_entity(tail_tokens, tail_len, max_entity_len)
-        _truncate_text(text_tokens, text_len, max_text_len)
-
-    elif len(input_tokens) == 5:
-        head_tokens, rel_1_tokens, mid_tokens, rel_2_tokens, tail_tokens = input_tokens
-        head_len, rel_1_len, mid_len, rel_2_len, tail_len = \
-            len(head_tokens), len(rel_1_tokens), len(mid_tokens), len(rel_2_tokens), len(tail_tokens)
-
-        _truncate_relation(rel_1_tokens, rel_1_len, max_rel_len)
-        _truncate_relation(rel_2_tokens, rel_2_len, max_rel_len)
-
-        if text_type == 'head':
-            _truncate_entity(mid_tokens, mid_len, max_entity_len)
-            _truncate_entity(tail_tokens, tail_len, max_entity_len)
-            _truncate_text(head_tokens, head_len, max_text_len)
-
-        elif text_type == 'mid':
-            _truncate_entity(head_tokens, head_len, max_entity_len)
-            _truncate_entity(tail_tokens, tail_len, max_entity_len)
-            _truncate_text(mid_tokens, mid_len, max_text_len)
-
-        elif text_type == 'tail':
-            _truncate_entity(mid_tokens, mid_len, max_entity_len)
-            _truncate_entity(head_tokens, head_len, max_entity_len)
-            _truncate_text(tail_tokens, tail_len, max_text_len)
-
-
 if __name__ == '__main__':
-    from transformers import BertTokenizer
+    from transformers import BertTokenizer, RobertaTokenizer, AutoTokenizer
     import sys
 
-    max_entity_len = int(sys.argv[1])  # FB15K237 18 ; WN18RR 17
-    max_rel_len = int(sys.argv[2])  # FB15K237 38 ; WN18RR 5
-    max_seq_len = int(sys.argv[3])  # FB15K237 512 ; WN18RR 192
+    max_entity_len = int(sys.argv[1])  # FB15K237 21 ; WN18RR 17
+    max_rel_len = int(sys.argv[2])  # FB15K237 23 ; WN18RR 5
+    max_seq_len = int(sys.argv[3])  # FB15K237 187 ; WN18RR 192
     task = sys.argv[4]
     task_name = sys.argv[5]
     data_dir = sys.argv[6]
+    save_dir = sys.argv[7]
 
-    tokenizer = BertTokenizer.from_pretrained("/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/")
-    processor = KGProcessor(data_dir, tokenizer, max_entity_len, max_rel_len, max_seq_len, 0, False)
-    # label_list = processor.get_labels(data_dir)
-    # label_map = {label: i for i, label in enumerate(label_list)}
+    tokenizer = RobertaTokenizer.from_pretrained("/home/wanghuadong/liangshihao/KEPLER-huggingface/roberta-base")
+    processor = KGProcessor(data_dir, tokenizer, max_entity_len, max_rel_len, max_seq_len, 3, False, save_dir=save_dir)
+
     features = []
-    print(task)
     if task == 'train':
-        if task_name == 'triple_text':
-            features = processor.get_triple_train_examples(data_dir)
-        elif "alias" in task_name:
-            features = processor.get_alias_train_examples(data_dir)
-        else:
             features = processor.get_train_examples(data_dir)
     elif task == 'dev':
-        if "alias" in task_name:
-            features = processor.get_alias_dev_examples(data_dir)
-        else:
             features = processor.get_dev_examples(data_dir)
     elif task == 'test':
-        if "alias" in task_name:
-            features = processor.get_alias_test_examples(data_dir)
-        elif "path" in task_name:
-            features = processor.get_path_test_triple_examples(data_dir)
-        else:
             features = processor.get_test_examples(data_dir)

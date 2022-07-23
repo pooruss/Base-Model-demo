@@ -7,15 +7,15 @@ import collections
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from models.bigmodel import BertBase, BertBaseBMT
+from models.bigmodel import BertBase, BertBaseBMT, RobertaBase, RobertaBaseBMT
 from data.base_dataset import BaseDataset, BaseTestDataset
-from config import init_bert_net_config
+from config import init_model_config
 import logging
 import argparse
 from config.args import ArgumentGroup
 import bmtrain as bmt
 from model_center.dataset import DistributedDataLoader
-from data import MLMFeaturesWithNeg, MLERMFeatures
+from data import MLERMFeatures
 
 
 def boolean_string(s):
@@ -50,9 +50,11 @@ parser.add_argument("--bmtrain", default=False, type=boolean_string, help="use b
 parser.add_argument("--ckpt_path", default='.', type=str, required=True, help="save directory.")
 parser.add_argument("--save_path", default='.', type=str, required=True, help="save directory.")
 parser.add_argument("--save_file", default='.', type=str, required=True, help="save directory.")
+parser.add_argument("--data_directory", default='.', type=str, required=True, help="save directory.")
 parser.add_argument("--pretrained_path", default='.', type=str, required=True, help="save directory.")
 parser.add_argument("--do_train", default=False, type=boolean_string, help="use bmtrain or not.")
 parser.add_argument("--do_test", default=False, type=boolean_string, help="use bmtrain or not.")
+parser.add_argument("--roberta", default=True, type=boolean_string, help="use bmtrain or not.")
 
 args = parser.parse_args()
 
@@ -94,8 +96,10 @@ def main():
                                    do_train=False,
                                    do_eval=False,
                                    do_test=True,
+                                   data_directory=args.data_directory,
                                    task=args.task_name,
-                                   max_seq_len=args.max_seq_len)
+                                   max_seq_len=args.max_seq_len,
+                                   pretrained_path=args.pretrained_path)
     if args.bmtrain:
         test_data_loader = DistributedDataLoader(dataset=test_dataset, batch_size=args.batch_size, shuffle=False)
     else:
@@ -106,6 +110,7 @@ def main():
     ent2text = {}
     entity2token_id = {}
     mean_entity_len = 0.0
+    max_entity_len = 0
     with open(os.path.join(args.data_root, "entity2text.txt"), 'r', encoding='utf-8') as f:
         total_len = 0.0
         ent_lines = f.readlines()
@@ -121,8 +126,10 @@ def main():
                 entity = test_dataset.tokenizer.tokenize(ent2alias[temp[0]])
                 entity2token_id[temp[0]] = test_dataset.tokenizer.convert_tokens_to_ids(entity)
                 entity_len = len(entity2token_id[temp[0]])
+                if entity_len > max_entity_len:
+                    max_entity_len = entity_len
                 total_len += entity_len
-        print(total_len/len(ent_lines))
+        print(total_len / len(ent_lines))
 
     if args.data_root.find("FB15") != -1:
         ent2text = {}
@@ -186,22 +193,27 @@ def main():
     args.mask_id = test_dataset.mask_id
     args.vocab_size = test_dataset.vocab_size
 
-    coke_config = init_bert_net_config(args, logger, print_config=True)
+    model_config = init_model_config(args, logger, print_config=True)
     if args.bmtrain:
-        model = BertBaseBMT(config=coke_config)
+        model = BertBaseBMT(config=model_config)
         bmt.init_parameters(model)
         bmt.load(model, args.ckpt_root)
         bmt.synchronize()
     else:
-        model = BertBase(config=coke_config)
+        if args.roberta:
+            print("roberta")
+            model = RobertaBase(config=model_config)
+        else:
+            print("bert")
+            model = BertBase(config=model_config)
         model.tokenizer = test_dataset.tokenizer
 
         if args.gpus > 1:
             model = nn.DataParallel(model, device_ids=device_ids)
         state_dict = torch.load(args.ckpt_path, map_location=device)
-        for name, param in state_dict.items():
-            if "linear2" in name:
-                print(param)
+        # for name, param in state_dict.items():
+        #     print(name)
+        # x = input()
         model.load_state_dict(state_dict)
         model.to(device=device)
 
@@ -220,108 +232,137 @@ def main():
     mem_total_acc = 0.0
     for iter, batch_data in tqdm(enumerate(test_data_loader)):
         # fetch batch data
-        try:
-            src_ids, input_mask, seg_ids, pos_ids, mem_label_ids, mem_label_idx, mask_types = batch_data
-        except RuntimeError:
-            print("One data instance's length should be 5, received {}.".format(len(batch_data)))
-            continue
-        if args.use_cuda:
-            src_ids, input_mask, seg_ids, pos_ids, mem_label_idx, mem_label_ids = \
-                src_ids.to(device), input_mask.to(device), seg_ids.to(device), \
-                pos_ids.to(device), mem_label_idx.to(device), mem_label_ids.to(device)
-        mem_probs_list = []
-        for j in range(args.batch_size):
-            temp_seg = seg_ids[j]
-            temp_pos = pos_ids[j]
-            temp_src = src_ids[j]
-            temp_src[mem_label_idx[j][0]:mem_label_idx[j][1]+1] = 0
-            temp_input_mask = input_mask[j]
-            temp_input_mask[mem_label_idx[j][0]:mem_label_idx[j][1]+1] = 0
-            temp_prob_list = []
-            for i in range(18):
-                temp_src[mem_label_idx[j][0]: mem_label_idx[j][0]+i+1] = test_dataset.mask_id
-                try:
-                    temp_src[mem_label_idx[j][0]+i+1] = test_dataset.ent_end_id
-                except:
-                    print(temp_src)
-                temp_input_mask[mem_label_idx[j][0]: mem_label_idx[j][0]+i+2] = 1
+        with torch.no_grad():
+            try:
+                src_ids, input_mask, mem_label_ids, mem_label_idx, mask_type = batch_data
+            except RuntimeError:
+                print("One data instance's length should be 5, received {}.".format(len(batch_data)))
+                continue
+
+            if args.use_cuda:
+                src_ids, input_mask, mem_label_idx, mem_label_ids = \
+                    src_ids.to(device), input_mask.to(device), mem_label_idx.to(device), mem_label_ids.to(device)
+            # check features, align with training and validation
+            # mem_mask_pos = torch.argwhere(mem_label_ids.reshape(-1) > 0)
+            # mem_label_ids = mem_label_ids.view(-1)[mem_mask_pos].squeeze()
+            #
+            # input_x = {
+            #     'src_ids': src_ids,
+            #     'input_mask': input_mask,
+            #     'segment_ids': seg_ids,
+            #     'position_ids': pos_ids
+            # }
+            #
+            # # forward
+            # logits = model(input_x)["logits"]
+            # mem_last_hidden_state = logits.view(-1, test_dataset.vocab_size)[mem_mask_pos.view(-1)]
+            # mem_acc = mem_last_hidden_state.max(dim=1)[1].eq(mem_label_ids.squeeze()).sum()
+            # print(mem_acc * 100 / mem_label_ids.size(0))
+
+            mem_probs_list = []
+            for j in range(args.batch_size):
+                label_idx = mem_label_idx[j]
+                temp_src = []
+                temp_input_mask = []
+                for i in range(max_entity_len):
+                    temp_src.append(src_ids[j])
+                    temp_input_mask.append(input_mask[j])
+                batch_input_mask = torch.stack(temp_input_mask, dim=0)
+                batch_src = torch.stack(temp_src, dim=0)
+
+                temp_src = src_ids[j]
+                temp_src[label_idx[0]:label_idx[1] + 1] = 0
+                temp_input_mask = input_mask[j]
+                temp_input_mask[label_idx[0]:label_idx[1] + 1] = 0
+
+                for i in range(max_entity_len):
+                    temp_src[label_idx[0]: label_idx[0] + i + 1] = test_dataset.mask_id
+                    try:
+                        temp_src[label_idx[0] + i + 1] = test_dataset.ent_end_id
+                    except:
+                        print(temp_src)
+                    temp_input_mask[label_idx[0]: label_idx[0] + i + 2] = 1
+                    batch_src[i] = temp_src
+                    batch_input_mask[i] = temp_input_mask
 
                 input_x = {
-                    'src_ids': temp_src.unsqueeze(dim=0),
-                    'input_mask': temp_input_mask.unsqueeze(dim=0),
-                    'segment_ids': temp_seg.unsqueeze(dim=0),
-                    'position_ids': temp_pos.unsqueeze(dim=0)
+                    'src_ids': batch_src,
+                    'input_mask': batch_input_mask
                 }
                 # forward
                 mem_probs = model(input_x)["logits"]
                 mem_probs = list(mem_probs.cpu().detach().numpy())
-                temp_prob_list.append(mem_probs)
-            mem_probs_list.append(temp_prob_list)
+                mem_probs_list.append(mem_probs)
 
-        mem_label_idx = mem_label_idx.cpu().detach().numpy()
-        mem_label_ids = mem_label_ids.cpu().detach().numpy()
-        mem_probs_list = np.array(mem_probs_list)
+            mem_label_idx = mem_label_idx.cpu().detach().numpy()
+            mem_label_ids = mem_label_ids.cpu().detach().numpy()
+            mem_probs_list = np.array(mem_probs_list)
 
-        for j in range(args.batch_size):
-            target = mem_label_ids[j][mem_label_idx[j][0]: mem_label_idx[j][1]]
-            test_target = np.array(entity2token_id[np.array([test[(iter * args.batch_size) + (j)]])[0]])
-            assert (target == test_target).all()
+            for j in range(args.batch_size):
+                target = mem_label_ids[j][mem_label_idx[j][0]: mem_label_idx[j][1]]
+                # test_target = np.array(entity2token_id[np.array([test[(iter * args.batch_size) + (j)]])[0]])
+                # print(target)
+                # print(test_target)
+                # assert (target == test_target).all()
+                target_len = len(target)
+                filter_set = set()
+                target_entity = test[(iter * args.batch_size) + (j)]
+                target_rel = test_rel[(iter * args.batch_size) + (j)]
+                entity_prob_list = []
+                target_score = 0.0
+                for idx, _entity_id in enumerate(range(len(id2entity))):
+                    entity = id2entity[_entity_id]
+                    if entity in filter_dict[target_entity][target_rel] and entity != target_entity:
+                        filter_set.add(_entity_id)
+                    _entity_token_id = entity2token_id[entity]
+                    entity_len = len(_entity_token_id)
+                    preds = mem_probs_list[j][entity_len - 1][mem_label_idx[j][0]: mem_label_idx[j][0] + entity_len]
+                    _entity_prob = preds[np.arange(entity_len), _entity_token_id]
+                    entity_prob_list.append(np.mean(_entity_prob))
+                    if entity == target_entity:
+                        target_score = np.mean(_entity_prob)
 
-            filter_set = set()
-            target_entity = test[(iter * args.batch_size) + (j)]
-            target_rel = test_rel[(iter * args.batch_size) + (j)]
-            entity_prob_list = []
-            for idx, _entity_id in enumerate(range(len(id2entity))):
-                entity = id2entity[_entity_id]
-                if entity in filter_dict[target_entity][target_rel] and entity != target_entity:
-                    filter_set.add(_entity_id)
-                _entity_token_id = entity2token_id[entity]
-                entity_len = len(_entity_token_id)
-                preds = mem_probs_list[j][entity_len - 1][0][mem_label_idx[j][0]: mem_label_idx[j][0] + entity_len]
-                _entity_prob = preds[np.arange(entity_len), _entity_token_id]
-                entity_prob_list.append(np.mean(_entity_prob))
+                topk_entity_idx = np.argsort(entity_prob_list)[::-1]
+                topk_entity = []
+                # print("############")
+                # print(test_dataset.tokenizer.convert_ids_to_tokens(target))
+                # print(target_score)
+                for id in topk_entity_idx:
+                    entity = id2entity[id]
+                    _entity_token_id = entity2token_id[entity]
+                    if id not in filter_set:
+                        topk_entity.append(id2entity[id])
+                    entity_token = test_dataset.tokenizer.convert_ids_to_tokens(_entity_token_id)
+                    # print(entity_token)
+                    # print(entity_prob_list[id])
 
-            topk_entity_idx = np.argsort(entity_prob_list)[::-1]  # [:10]
-            topk_entity = []
-            for id in topk_entity_idx:
-                if id not in filter_set:
-                    topk_entity.append(id2entity[id])
+                topk_entity_list.append(topk_entity)
 
-            topk_entity_list.append(topk_entity)
+                test_list = []
+                test_list.append(topk_entity)
+                test_array = np.array(test_list)
+                target = np.array([test[(iter * args.batch_size) + (j)]])
+                test_hits1, test_hits3, test_hits10, test_MR, test_MRR = eval_fn(target, test_array, realtime_mr_rate,
+                                                                                 realtime_mrr_rate)
 
-            test_list = []
-            test_list.append(topk_entity)
-            test_array = np.array(test_list)
-            target = np.array([test[(iter * args.batch_size) + (j)]])
-            test_hits1, test_hits3, test_hits10, test_MR, test_MRR = eval_fn(target, test_array, realtime_mr_rate,
-                                                                             realtime_mrr_rate)
-
-            realtime_hits10 += test_hits10
-            realtime_hits3 += test_hits3
-            realtime_hits1 += test_hits1
-            realtime_mrr += test_MRR
-            realtime_mr += test_MR
-            count += 1
+                realtime_hits10 += test_hits10
+                realtime_hits3 += test_hits3
+                realtime_hits1 += test_hits1
+                realtime_mrr += test_MRR
+                realtime_mr += test_MR
+                count += 1
             # print(test_MRR)
             # print("#################")
-        realtime_hits10_rate = realtime_hits10 / count
-        realtime_hits3_rate = realtime_hits3 / count
-        realtime_hits1_rate = realtime_hits1 / count
-        realtime_mr_rate = realtime_mr / count
-        realtime_mrr_rate = realtime_mrr / count
-        print("realtime_hits1_rate:", realtime_hits1_rate)
-        print("realtime_hits3_rate", realtime_hits3_rate)
-        print("realtime_hits10_rate", realtime_hits10_rate)
-        print("realtime_mrr_rate", realtime_mrr_rate)
-        print("realtime_mr_rate:", realtime_mr_rate)
-
-    # topk_entity_array = np.array(topk_entity_list)
-    # test_hits1, test_hits3, test_hits10, test_MR, test_MRR = eval_fn(test, topk_entity_array, realtime_mr_rate, realtime_mrr_rate)
-    # print(test_hits1)
-    # print(test_hits3)
-    # print(test_hits10)
-    # print(test_MR)
-    # print(test_MRR)
+            realtime_hits10_rate = realtime_hits10 / count
+            realtime_hits3_rate = realtime_hits3 / count
+            realtime_hits1_rate = realtime_hits1 / count
+            realtime_mr_rate = realtime_mr / count
+            realtime_mrr_rate = realtime_mrr / count
+            print("realtime_hits1_rate:", realtime_hits1_rate)
+            print("realtime_hits3_rate", realtime_hits3_rate)
+            print("realtime_hits10_rate", realtime_hits10_rate)
+            print("realtime_mrr_rate", realtime_mrr_rate)
+            print("realtime_mr_rate:", realtime_mr_rate)
 
     eval_result = {
         'hits1': realtime_hits1_rate,

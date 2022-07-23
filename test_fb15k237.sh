@@ -2,18 +2,18 @@
 
 frame=${1}
 TASK=${2}
-GPU_IDS=${3}
-ckpt_path=${4}
-save_path=${5}
-save_file=${6}
+DATA_DIRE=${3}
+GPU_IDS=${4}
+ckpt_path=${5}
+save_path="./checkpoints/"
+save_file="1.json"
 
-export MAX_SEQ_LEN=512
-export BATCH_SIZE=32
-export NPROC_PER_NODE=4
+export MAX_SEQ_LEN=187
+export BATCH_SIZE=4
 export DATA_ROOT=/data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237-demo/
-export PRETRAINED_PATH=/home/wanghuadong/liangshihao/KEPLER-huggingface/bert-base/
-export MAX_ANS_LEN=18
-
+export PRETRAINED_PATH=/home/wanghuadong/liangshihao/KEPLER-huggingface/roberta-base/
+export MAX_ANS_LEN=21
+export ROBERTA=True
 
 if [ ${frame} = 'bmtrain'];
 then
@@ -33,12 +33,14 @@ then
   --gpu_ids ${GPU_IDS} \
   --bmtrain False \
   --task_name ${TASK} \
+  --data_directory ${DATA_DIRE} \
   --ckpt_path ${ckpt_path} \
   --save_path ${save_path} \
   --save_file ${save_file} \
   --pretrained_path ${PRETRAINED_PATH} \
   --do_train False \
-  --do_test True
+  --do_test True \
+  --roberta ${ROBERTA}
 
 else
   python ./evaluation.py \
@@ -51,10 +53,12 @@ else
   --gpu_ids ${GPU_IDS} \
   --bmtrain False \
   --task_name ${TASK} \
+  --data_directory ${DATA_DIRE} \
   --ckpt_path ${ckpt_path} \
   --save_path ${save_path} \
   --save_file ${save_file} \
   --pretrained_path ${PRETRAINED_PATH} \
   --do_train False \
-  --do_test True
+  --do_test True \
+  --roberta ${ROBERTA}
 fi
