@@ -3,6 +3,8 @@
 Requirements:
 
 - torch ==1.11.0
+- transformers==4.4.0
+- bmtrain==0.1.7
 
 
 
@@ -18,20 +20,15 @@ sh data_preprocess.sh wn18rr triple_text /data/private/wanghuadong/liangshihao/B
 
 #### to train
 ```shell
-# /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237/
-# /home/wanghuadong/liangshihao/kg-bert-master/data/FB15k-237/
-sh train_fb15k237.sh torch triple_text triple_text/ 0 ./checkpoints/
-sh train_wnn18rr.sh torch triple_text triple_text/ 0 ./checkpoints/
-sh train_fb15k237.sh bmtrain triple_text triple_text/ 0 ./checkpoints/
+sh run_train.sh torch triple_text triple_text/ 0 ./checkpoints/
+# use bmtrain
+sh run_train.sh bmtrain triple_text triple_text/ 0 ./checkpoints/
 ```
 
 
 #### to test
 
 ```shell
-# /data/private/wanghuadong/liangshihao/BMKG/data/FB15k-237/
-# /home/wanghuadong/liangshihao/kg-bert-master/data/FB15k-237/
-sh test_fb15k237.sh torch triple_text triple_text/ 0 ckpt_dir
-sh test_wn18rr.sh torch triple_text triple_text/ 0 ckpt_dir
+sh run_test.sh torch triple_text triple_text/ 0 ckpt_dir
 ```
 
